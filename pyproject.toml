@@ -1,0 +1,19 @@
+[project]
+name = "ai-tax-agent"
+version = "0.1.0"
+description = ""
+authors = [
+    {name = "Chris Andrasick",email = "chris@andrasick.com"}
+]
+license = {text = "MIT"}
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+    "sqlalchemy (>=2.0.40,<3.0.0)",
+    "alembic (>=1.15.2,<2.0.0)"
+]
+
+
+[build-system]
+requires = ["poetry-core>=2.0.0,<3.0.0"]
+build-backend = "poetry.core.masonry.api"
