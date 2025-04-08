@@ -172,3 +172,7 @@ cython_debug/
 
 # PyPI configuration file
 .pypirc
+
+# SQLite database file (Project Specific)
+tax_data.db
+*.db-journal
