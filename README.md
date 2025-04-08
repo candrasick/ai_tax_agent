@@ -25,12 +25,22 @@ This project uses [Poetry](https://python-poetry.org/) for dependency management
     cd ai-tax-agent
     ```
 
-3.  **Install dependencies:**
+3.  **Install Git LFS:**
+    This project uses [Git Large File Storage (LFS)](https://git-lfs.github.com/) to manage large data files (e.g., tax documents in the `data/` directory). You need to install the Git LFS client to download these files correctly.
+    *   If using Homebrew (macOS): `brew install git-lfs`
+    *   Otherwise, follow the [official installation instructions](https://git-lfs.github.com/).
+    After installing, ensure LFS is initialized for your user account (usually only needed once per machine):
+    ```bash
+    git lfs install 
+    ```
+    If you cloned the repository *before* installing Git LFS, navigate into the repository directory and run `git lfs pull` to download the large files.
+
+4.  **Install dependencies:**
     ```bash
     poetry install
     ```
 
-4.  **Set up the database:**
+5.  **Set up the database:**
     The project uses SQLite and Alembic for database schema management. Run the initial migration:
     ```bash
     # Ensure the database file (tax_data.db) exists and is up-to-date
