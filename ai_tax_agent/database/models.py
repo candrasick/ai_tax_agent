@@ -21,6 +21,8 @@ class UsCodeSection(Base):
     section_number = Column(Text, nullable=False) # Using Text for flexibility (e.g., §280G, 1A)
     section_title = Column(Text, nullable=True)
     full_text = Column(Text, nullable=True)
+    amendments_text = Column(Text, nullable=True) # Added for separated amendment notes
+    core_text = Column(Text, nullable=True) # Added for core legal text without amendments
     amendment_count = Column(Integer, default=0, nullable=False)
     special_formatting = Column(Boolean, default=False, nullable=False)
     updated_at = Column(Date, nullable=True)

@@ -6,8 +6,11 @@ import os
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
-# Get the database URL from environment variable or use a default
-DATABASE_URL = os.environ.get('DATABASE_URL', 'sqlite:///tax_data.db')
+# Import the settings instance
+from ai_tax_agent.settings import settings
+
+# Get the database URL from settings
+DATABASE_URL = settings.database_url
 
 # Create the engine
 engine = create_engine(DATABASE_URL)
