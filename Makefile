@@ -1,4 +1,4 @@
-.PHONY: db-migrate download-bulletins analyze-size parse-tax-code parse-tax-code-custom analyze-amendments analyze-amendments-limit visualize-amendments
+.PHONY: db-migrate download-bulletins analyze-size parse-tax-code parse-tax-code-custom analyze-amendments analyze-amendments-limit visualize-amendments parse-bulletins parse-bulletins-clear test-integration
 
 db-migrate:
 	@echo "Applying database migrations..."
@@ -40,4 +40,19 @@ analyze-amendments-limit:
 visualize-amendments:
 	@echo "Generating amendment data visualizations..."
 	poetry run python scripts/visualize_amendments.py
-	@echo "Visualizations saved to plots/ directory." 
+	@echo "Visualizations saved to plots/ directory."
+
+parse-bulletins:
+	@echo "Parsing IRS Bulletin PDFs (incremental)..."
+	poetry run python scripts/parse_bulletins.py
+	@echo "Bulletin parsing complete."
+
+parse-bulletins-clear:
+	@echo "Clearing existing IRS Bulletin data and parsing PDFs..."
+	poetry run python scripts/parse_bulletins.py --clear
+	@echo "Bulletin parsing complete."
+
+test-integration:
+	@echo "Running integration tests..."
+	poetry run pytest -sv tests/integration
+	@echo "Integration tests complete." 
