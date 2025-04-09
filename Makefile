@@ -1,4 +1,4 @@
-.PHONY: db-migrate download-bulletins analyze-size parse-tax-code parse-tax-code-custom analyze-amendments analyze-amendments-limit visualize-amendments parse-bulletins parse-bulletins-clear test-integration
+.PHONY: db-migrate download-bulletins analyze-size parse-tax-code parse-tax-code-custom analyze-amendments analyze-amendments-limit visualize-amendments parse-bulletins parse-bulletins-clear link-bulletins link-bulletins-clear test-integration
 
 db-migrate:
 	@echo "Applying database migrations..."
@@ -51,6 +51,16 @@ parse-bulletins-clear:
 	@echo "Clearing existing IRS Bulletin data and parsing PDFs..."
 	poetry run python scripts/parse_bulletins.py --clear
 	@echo "Bulletin parsing complete."
+
+link-bulletins:
+	@echo "Linking bulletin items to code sections..."
+	poetry run python scripts/link_bulletins_to_sections.py
+	@echo "Linking complete."
+
+link-bulletins-clear:
+	@echo "Clearing existing links and linking bulletin items to code sections..."
+	poetry run python scripts/link_bulletins_to_sections.py --clear
+	@echo "Linking complete."
 
 test-integration:
 	@echo "Running integration tests..."

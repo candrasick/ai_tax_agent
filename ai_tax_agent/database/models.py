@@ -87,7 +87,7 @@ class IrsBulletinItemToCodeSection(Base):
     id = Column(Integer, primary_key=True)
     bulletin_item_id = Column(Integer, ForeignKey('irs_bulletin_item.id'), nullable=False)
     section_id = Column(Integer, ForeignKey('us_code_section.id'), nullable=False)
-    relevance_notes = Column(Text, nullable=True)
+    # relevance_notes = Column(Text, nullable=True) # Removed
     created_at = Column(TIMESTAMP, server_default=func.now(), nullable=False)
 
     # Define composite unique constraint
