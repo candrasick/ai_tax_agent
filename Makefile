@@ -1,4 +1,4 @@
-.PHONY: db-migrate download-bulletins analyze-size analyze-mentions parse-tax-code parse-tax-code-custom analyze-amendments analyze-amendments-limit visualize-amendments parse-bulletins parse-bulletins-clear link-bulletins link-bulletins-clear test test-unit test-integration test-db-integrity scrape-instructions scrape-instructions-clear extract-form-fields extract-form-fields-clear
+.PHONY: db-migrate download-bulletins analyze-size analyze-mentions parse-tax-code parse-tax-code-custom analyze-amendments analyze-amendments-limit visualize-amendments parse-bulletins parse-bulletins-clear link-bulletins link-bulletins-clear test test-unit test-integration test-db-integrity test-form-integrity scrape-instructions scrape-instructions-clear extract-form-fields extract-form-fields-clear
 
 db-migrate:
 	@echo "Applying database migrations..."
@@ -84,6 +84,11 @@ test-db-integrity:
 	@echo "Running database integrity tests..."
 	poetry run pytest -sv tests/integration/test_db_integrity.py
 	@echo "Database integrity tests complete."
+
+test-form-integrity:
+	@echo "Running form data integrity tests..."
+	poetry run pytest -sv tests/integration/test_form_data_integrity.py
+	@echo "Form data integrity tests complete."
 
 scrape-instructions:
 	@echo "Scraping IRS form instructions (incremental update)..."
