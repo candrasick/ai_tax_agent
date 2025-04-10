@@ -146,9 +146,9 @@ def extract_details_from_segment(segment_text: str) -> Dict:
         details["actions"].add(match.group(1).lower())
         
     # --- DEBUG: Print segment text before searching for sections ---
-    print("\n--- Searching for sections in segment: ---")
-    print(segment_text[:500] + ("..." if len(segment_text) > 500 else "")) # Print start of segment
-    print("-----------------------------------------")
+    # print("\n--- Searching for sections in segment: ---")
+    # print(segment_text[:500] + ("..." if len(segment_text) > 500 else "")) # Print start of segment
+    # print("-----------------------------------------")
     # ----------------------------------------------------------
         
     # Find section reference numbers (using Group 1 from the refined regex)
@@ -160,12 +160,12 @@ def extract_details_from_segment(segment_text: str) -> Dict:
             section_num_stripped = section_num_part.strip()
             details["section_numbers"].add(section_num_stripped)
             # --- DEBUG: Print found section number --- 
-            print(f"  DEBUG: Found section ref -> {match.group(0)} -> Captured: {section_num_stripped}")
+            # print(f"  DEBUG: Found section ref -> {match.group(0)} -> Captured: {section_num_stripped}")
             # ----------------------------------------
     
     # --- DEBUG: Indicate if no matches were found ---
-    if not found_any_match:
-        print("  DEBUG: No section references found by regex in this segment.")
+    # if not found_any_match:
+    #     print("  DEBUG: No section references found by regex in this segment.")
     # ------------------------------------------------
         
     return details

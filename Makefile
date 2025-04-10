@@ -1,4 +1,4 @@
-.PHONY: db-migrate download-bulletins analyze-size parse-tax-code parse-tax-code-custom analyze-amendments analyze-amendments-limit visualize-amendments parse-bulletins parse-bulletins-clear link-bulletins link-bulletins-clear test-integration
+.PHONY: db-migrate download-bulletins analyze-size analyze-mentions parse-tax-code parse-tax-code-custom analyze-amendments analyze-amendments-limit visualize-amendments parse-bulletins parse-bulletins-clear link-bulletins link-bulletins-clear test test-unit test-integration
 
 db-migrate:
 	@echo "Applying database migrations..."
@@ -13,7 +13,12 @@ download-bulletins:
 analyze-size:
 	@echo "Analyzing tax code and bulletin page counts..."
 	poetry run python scripts/analyze_code_size.py
-	@echo "Analysis complete. Plot saved to plots/tax_code_growth.png (by default)." 
+	@echo "Analysis complete. Plot saved to plots/tax_code_growth.png (by default)."
+
+analyze-mentions:
+	@echo "Analyzing section mentions in bulletins and amendments in IRC..."
+	poetry run python scripts/analyze_section_mentions.py
+	@echo "Mention analysis complete. Plots saved to plots/ (by default)."
 
 parse-tax-code:
 	@echo "Parsing U.S. Tax Code XML file..."
@@ -61,6 +66,14 @@ link-bulletins-clear:
 	@echo "Clearing existing links and linking bulletin items to code sections..."
 	poetry run python scripts/link_bulletins_to_sections.py --clear
 	@echo "Linking complete."
+
+test:
+	@echo "Running all tests..."
+
+test-unit:
+	@echo "Running unit tests..."
+	poetry run pytest -sv tests/unit
+	@echo "Unit tests complete."
 
 test-integration:
 	@echo "Running integration tests..."
