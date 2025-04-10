@@ -18,17 +18,19 @@ from pydantic import BaseModel, Field
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 # LangChain components
-from langchain_google_genai import ChatGoogleGenerativeAI
+# from langchain_google_genai import ChatGoogleGenerativeAI # No longer needed directly
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import PydanticOutputParser
 
 # Project components
-from ai_tax_agent.settings import settings # Loads .env variables including GEMINI_API_KEY
+from ai_tax_agent.settings import settings # Keep for now, maybe remove later if key only used in util
 from ai_tax_agent.database.models import UsCodeSection
 from ai_tax_agent.database.session import get_session
+from ai_tax_agent.llm_utils import get_gemini_llm # Import the shared function
 
 # --- LLM Configuration ---
 MODEL_NAME = "gemini-1.5-flash-latest"
+LLM_TEMPERATURE = 0.1 # Define temperature separately
 
 # --- Pydantic Output Schema (Simplified & Field Renamed) ---
 class AmendmentAnalysisOutput(BaseModel):
@@ -147,17 +149,11 @@ def run_amendment_analysis(limit: Optional[int] = None, batch_size: int = 50):
     """Runs the amendment analysis agent using heuristic splitting and LLM counting."""
     print(f"Starting amendment analysis using model: {MODEL_NAME}")
     
-    # Initialize LLM
-    try:
-        llm = ChatGoogleGenerativeAI(
-            model=MODEL_NAME, 
-            google_api_key=settings.gemini_api_key,
-            temperature=0.1 # Low temperature for deterministic analysis
-        )
-    except Exception as e:
-        print(f"Error initializing LLM: {e}")
-        print("Please ensure your GEMINI_API_KEY is set correctly in the .env file.")
-        return
+    # Initialize LLM using the shared utility function
+    llm = get_gemini_llm(model_name=MODEL_NAME, temperature=LLM_TEMPERATURE)
+    if not llm:
+        # Error is logged within get_gemini_llm
+        return 
 
     # Setup Prompt and Parser
     parser = PydanticOutputParser(pydantic_object=AmendmentAnalysisOutput)

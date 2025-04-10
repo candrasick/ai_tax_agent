@@ -1,4 +1,4 @@
-.PHONY: db-migrate download-bulletins analyze-size analyze-mentions parse-tax-code parse-tax-code-custom analyze-amendments analyze-amendments-limit visualize-amendments parse-bulletins parse-bulletins-clear link-bulletins link-bulletins-clear test test-unit test-integration test-db-integrity test-form-integrity scrape-instructions scrape-instructions-clear extract-form-fields extract-form-fields-clear
+.PHONY: db-migrate download-bulletins analyze-size analyze-mentions parse-tax-code parse-tax-code-custom analyze-amendments analyze-amendments-limit visualize-amendments parse-bulletins parse-bulletins-clear link-bulletins link-bulletins-clear test test-unit test-integration test-db-integrity test-form-integrity scrape-instructions scrape-instructions-clear extract-form-fields extract-form-fields-clear extract-form-fields-llm extract-form-fields-llm-limit
 
 db-migrate:
 	@echo "Applying database migrations..."
@@ -108,4 +108,15 @@ extract-form-fields:
 extract-form-fields-clear:
 	@echo "Clearing existing form fields and extracting new ones..."
 	poetry run python scripts/extract_form_fields.py --clear
-	@echo "Extraction complete. Fields saved to database." 
+	@echo "Extraction complete. Fields saved to database."
+
+extract-form-fields-llm:
+	@echo "Extracting form fields using LLM (incremental)..."
+	poetry run python scripts/extract_form_fields_llm.py
+	@echo "LLM extraction complete."
+
+extract-form-fields-llm-limit:
+	@echo "Extracting form fields using LLM (limited)..."
+	@read -p "Enter the maximum number of forms to process: " limit; \
+	poetry run python scripts/extract_form_fields_llm.py --limit $$limit
+	@echo "Limited LLM extraction complete." 
