@@ -29,6 +29,9 @@ class UsCodeSection(Base):
     updated_at = Column(Date, nullable=True)
     created_at = Column(TIMESTAMP, server_default=func.now(), nullable=False)
 
+    # Add unique constraint for section_number
+    __table_args__ = (UniqueConstraint('section_number', name='uq_section_number'),)
+
     def __repr__(self):
         return f"<UsCodeSection(id={self.id}, section_number='{self.section_number}', title='{self.section_title}')>"
 
