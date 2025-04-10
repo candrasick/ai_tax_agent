@@ -50,4 +50,61 @@ This project uses [Poetry](https://python-poetry.org/) for dependency management
 
 ## Usage
 
-(Instructions on how to run the agent/components will be added here later.)
+### Makefile Targets
+
+This project uses a `Makefile` to streamline common tasks. Here's a breakdown of the available targets and their recommended execution order:
+
+**Recommended Execution Order (for initial setup & data processing):**
+
+1.  `make download-bulletins`
+2.  `make db-migrate`
+3.  `make parse-tax-code` (Requires `data/usc26.xml`)
+4.  `make parse-bulletins` (Requires downloaded PDFs in `data/irb/`)
+5.  `make link-bulletins` (Links parsed bulletins to parsed code sections in the DB)
+6.  (Optional Analysis) `make analyze-size`, `make analyze-mentions`
+7.  (Testing) `make test`, `make test-unit`, `make test-integration`
+
+**Target Descriptions:**
+
+*   `download-bulletins`
+    *   Runs `scripts/download_irb_bulletins.py` to download Internal Revenue Bulletins (IRBs) as PDFs into the `data/irb/` directory.
+*   `db-migrate`
+    *   Applies database migrations using Alembic. Creates or updates the database schema in `data/tax_data.db` based on models defined in `ai_tax_agent/db/models.py`.
+*   `parse-tax-code`
+    *   Runs `scripts/parse_tax_code.py` to parse the main IRC XML file (`data/usc26.xml`) and populate the `us_code_section` table in the database.
+*   `parse-bulletins`
+    *   Runs `scripts/parse_bulletins.py` to parse the downloaded bulletin PDFs, extracting metadata and potentially text, populating the `irs_bulletin` and `irs_bulletin_item` tables.
+*   `link-bulletins`
+    *   Runs `scripts/link_bulletins_to_sections.py` to identify references to IRC sections within the parsed bulletin text and create links in the `irs_bulletin_item_to_code_section` table.
+*   `analyze-size`
+    *   Runs `scripts/analyze_code_size.py` to count pages in the main tax code PDF and downloaded bulletins, generating a plot of size over time (`plots/tax_code_growth.png`).
+*   `analyze-mentions`
+    *   Runs `scripts/analyze_section_mentions.py` using data from the database to analyze the frequency of section mentions in bulletins and their correlation with amendment counts. Generates plots (`plots/top_bulletin_mentions_from_db.png`, `plots/mentions_amendments_correlation_from_db.png`).
+*   `test`
+    *   Runs all available tests (unit and integration).
+*   `test-unit`
+    *   Runs only the unit tests located in `tests/unit`.
+*   `test-integration`
+    *   Runs only the integration tests located in `tests/integration`.
+
+*(Note: Some targets like `parse-tax-code-custom`, `analyze-amendments`, etc., might exist but are not fully described here. Refer to the `Makefile` for details.)*
+
+### Database Schema (`data/tax_data.db`)
+
+The project uses an SQLite database managed by SQLAlchemy and Alembic. The core tables are:
+
+*   `alembic_version`:
+    *   Tracks the current database migration version (used by Alembic).
+*   `us_code_section`:
+    *   Stores parsed sections of the U.S. Internal Revenue Code (Title 26).
+    *   Key columns: `id`, `section_number`, `section_title`, `full_text`, `amendment_count`, `amendments_text`, `core_text`.
+*   `irs_bulletin`:
+    *   Stores metadata about each downloaded Internal Revenue Bulletin.
+    *   Key columns: `id`, `bulletin_number`, `bulletin_date`, `source_url`.
+*   `irs_bulletin_item`:
+    *   Stores individual items (like Revenue Rulings, Notices, etc.) extracted from within each bulletin.
+    *   Key columns: `id`, `bulletin_id` (FK to `irs_bulletin`), `item_type`, `item_number`, `title`, `full_text`, `referenced_sections`.
+*   `irs_bulletin_item_to_code_section`:
+    *   A many-to-many link table connecting bulletin items (`bulletin_item_id`) to the specific code sections (`section_id` -> `us_code_section.id`) they reference.
+
+(Further details on agent usage will be added as components are developed.)
