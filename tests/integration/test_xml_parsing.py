@@ -21,7 +21,7 @@ from ai_tax_agent.parsers.xml_parser_utils import (
 XML_FILE_PATH = Path("data/usc26.xml")
 # Define the XML namespace (same as in parse_tax_code.py)
 NS = {'ns': 'http://xml.house.gov/schemas/uslm/1.0'}
-TARGET_SECTION = "1108" # The section we want to ensure is found
+TARGET_SECTION = "11" # The section we want to ensure is found (changed from 1108 which doesn't exist)
 
 # --- Helper: Extraction/Cleaning Logic (adapted from parse_tax_code.py) ---
 
@@ -84,9 +84,9 @@ def test_xml_section_parsing():
     # --- Assertions ---
     assert extracted_numbers, "No section numbers were extracted by the utility functions."
     
-    # 1. Check if the target section is found (REMOVED due to empty <num> tag in source)
-    # assert TARGET_SECTION in extracted_numbers, \
-    #     f"Target section '{TARGET_SECTION}' was not found in the extracted section numbers."
+    # 1. Check if the target section is found
+    assert TARGET_SECTION in extracted_numbers, \
+        f"Target section '{TARGET_SECTION}' was not found in the extracted section numbers."
     
     # 2. Check for duplicates
     duplicates = {num for num in extracted_numbers if extracted_numbers.count(num) > 1}

@@ -1,4 +1,4 @@
-.PHONY: db-migrate download-bulletins analyze-size analyze-mentions parse-tax-code parse-tax-code-custom analyze-amendments analyze-amendments-limit visualize-amendments parse-bulletins parse-bulletins-clear link-bulletins link-bulletins-clear test test-unit test-integration
+.PHONY: db-migrate download-bulletins analyze-size analyze-mentions parse-tax-code parse-tax-code-custom analyze-amendments analyze-amendments-limit visualize-amendments parse-bulletins parse-bulletins-clear link-bulletins link-bulletins-clear test test-unit test-integration test-db-integrity scrape-instructions scrape-instructions-clear extract-form-fields extract-form-fields-clear
 
 db-migrate:
 	@echo "Applying database migrations..."
@@ -78,4 +78,29 @@ test-unit:
 test-integration:
 	@echo "Running integration tests..."
 	poetry run pytest -sv tests/integration
-	@echo "Integration tests complete." 
+	@echo "Integration tests complete."
+
+test-db-integrity:
+	@echo "Running database integrity tests..."
+	poetry run pytest -sv tests/integration/test_db_integrity.py
+	@echo "Database integrity tests complete."
+
+scrape-instructions:
+	@echo "Scraping IRS form instructions (incremental update)..."
+	poetry run python scripts/scrape_irs_instructions.py
+	@echo "Scraping complete. Data saved to database (tax_agent.db)"
+
+scrape-instructions-clear:
+	@echo "Clearing existing form instructions and scraping new ones..."
+	poetry run python scripts/scrape_irs_instructions.py --clear --force
+	@echo "Scraping complete. Data saved to database (tax_agent.db)"
+
+extract-form-fields:
+	@echo "Extracting form fields from IRS instructions..."
+	poetry run python scripts/extract_form_fields.py
+	@echo "Extraction complete. Fields saved to database."
+
+extract-form-fields-clear:
+	@echo "Clearing existing form fields and extracting new ones..."
+	poetry run python scripts/extract_form_fields.py --clear
+	@echo "Extraction complete. Fields saved to database." 

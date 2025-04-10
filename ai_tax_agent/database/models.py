@@ -98,4 +98,37 @@ class IrsBulletinItemToCodeSection(Base):
     us_code_section = relationship("UsCodeSection") # No back_populates needed if UsCodeSection doesn't need to list these associations directly
 
     def __repr__(self):
-        return f"<IrsBulletinItemToCodeSection(item_id={self.bulletin_item_id}, section_id={self.section_id})>" 
+        return f"<IrsBulletinItemToCodeSection(item_id={self.bulletin_item_id}, section_id={self.section_id})>"
+
+class FormInstruction(Base):
+    """Model for IRS form instructions"""
+    __tablename__ = 'form_instructions'
+    
+    id = Column(Integer, primary_key=True)
+    title = Column(String(255), nullable=False)
+    form_number = Column(String(50), nullable=False, index=True)
+    html_url = Column(String(255))
+    created_at = Column(TIMESTAMP, server_default=func.now(), nullable=False)
+    
+    # Relationship to form fields
+    fields = relationship("FormField", back_populates="instruction")
+    
+    def __repr__(self):
+        return f"<FormInstruction(form_number='{self.form_number}')>"
+
+
+class FormField(Base):
+    """Model for form instruction fields"""
+    __tablename__ = 'form_fields'
+    
+    id = Column(Integer, primary_key=True)
+    instruction_id = Column(Integer, ForeignKey('form_instructions.id', ondelete='CASCADE'), nullable=False, index=True)
+    field_label = Column(String(100), nullable=False)  # e.g., "Line 1g. Other proceedings."
+    full_text = Column(Text, nullable=False)  # The complete instruction text for this field
+    created_at = Column(TIMESTAMP, server_default=func.now(), nullable=False)
+    
+    # Relationship to parent instruction
+    instruction = relationship("FormInstruction", back_populates="fields")
+    
+    def __repr__(self):
+        return f"<FormField(field_label='{self.field_label}')>" 
