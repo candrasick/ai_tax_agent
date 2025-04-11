@@ -1,4 +1,4 @@
-.PHONY: db-migrate download-bulletins analyze-size analyze-mentions parse-tax-code parse-tax-code-custom analyze-amendments analyze-amendments-limit visualize-amendments parse-bulletins parse-bulletins-clear link-bulletins link-bulletins-clear test test-unit test-integration test-db-integrity test-form-integrity scrape-instructions scrape-instructions-clear extract-form-fields extract-form-fields-clear extract-form-fields-llm extract-form-fields-llm-limit index-sections index-sections-clear index-instructions index-instructions-clear test-chroma-integrity
+.PHONY: db-migrate download-bulletins analyze-size analyze-mentions parse-tax-code parse-tax-code-custom analyze-amendments analyze-amendments-limit visualize-amendments parse-bulletins parse-bulletins-clear link-bulletins link-bulletins-clear test test-unit test-integration test-db-integrity test-form-integrity scrape-instructions scrape-instructions-clear extract-form-fields extract-form-fields-clear extract-form-fields-llm extract-form-fields-llm-limit index-sections index-sections-clear index-instructions index-instructions-clear test-chroma-integrity parse-pdf-layout
 
 db-migrate:
 	@echo "Applying database migrations..."
@@ -139,4 +139,8 @@ index-instructions-clear:
 
 test-chroma-integrity:
 	@echo "Running ChromaDB integrity tests..."
-	poetry run pytest tests/integration/test_chroma_integrity.py -v 
+	poetry run pytest tests/integration/test_chroma_integrity.py -v
+
+parse-pdf-layout: ## Parse PDF layout elements (use ARGUMENTS="path/to/file.pdf --page N")
+	@echo "Parsing PDF layout with arguments: $(ARGUMENTS)"
+	poetry run python scripts/parse_pdf_layout.py $(ARGUMENTS) 

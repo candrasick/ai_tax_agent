@@ -25,7 +25,8 @@ dependencies = [
     "langchain-google-genai (>=2.1.2,<3.0.0)",
     "seaborn (>=0.13.2,<0.14.0)",
     "chromadb (>=0.5.4)",
-    "onnxruntime (==1.18.0)"
+    "onnxruntime (==1.18.0)",
+    "pdfplumber (>=0.11.6,<0.12.0)"
 ]
 
 
