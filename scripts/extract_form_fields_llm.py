@@ -11,7 +11,7 @@ Includes options for limiting the number of forms processed and resuming.
 import os
 import requests
 import argparse
-from bs4 import BeautifulSoup
+from bs4 import BeautifulSoup, Tag
 from tqdm import tqdm
 import logging
 from typing import List, Optional
@@ -21,6 +21,7 @@ from typing import List, Optional
 from langchain_core.prompts import ChatPromptTemplate
 from pydantic import BaseModel, Field # Import from Pydantic v2
 from langchain_core.output_parsers import PydanticOutputParser
+from langchain_core.exceptions import OutputParserException # Import the exception
 
 # --- Shared Utilities --- #
 from ai_tax_agent.llm_utils import get_gemini_llm # Import the shared function
@@ -55,14 +56,15 @@ class FormFieldOutput(BaseModel):
     field_label: str = Field(description="The exact label of the form field, e.g., 'Line 1a. Testate estates.'")
     full_text: str = Field(description="The complete text associated with this field label, including the label and following explanation.")
 
-# Define Pydantic model for the list of fields extracted from one instruction
+# Reintroduce wrapper model, now expecting List[FormFieldOutput]
 class InstructionAnalysisOutput(BaseModel):
     fields: List[FormFieldOutput] = Field(description="A list of all extracted fields and their text from the instruction document.")
 
 # --- Output Parser --- #
 try:
+    # Parser now expects the wrapper model again
     parser = PydanticOutputParser(pydantic_object=InstructionAnalysisOutput)
-    logger.info("PydanticOutputParser initialized.")
+    logger.info("PydanticOutputParser initialized to expect InstructionAnalysisOutput.")
 except Exception as e:
     logger.error(f"Failed to initialize PydanticOutputParser: {e}")
     parser = None
@@ -90,22 +92,20 @@ def fetch_and_parse_html(url: str) -> Optional[BeautifulSoup]:
         logger.error(f"Error parsing HTML from {url}: {e}")
         return None
 
-def extract_main_content(soup: BeautifulSoup) -> Optional[str]:
-    """Extracts text content from the main content area of the IRS instructions page."""
-    main_content = soup.select_one('#main-content')
-    if not main_content:
+def extract_main_content(soup: BeautifulSoup) -> Optional[Tag]:
+    """Extracts the BeautifulSoup Tag for the main content area."""
+    main_content_tag = soup.select_one('#main-content')
+    if not main_content_tag:
         logger.warning("Could not find <div id='main-content'> in the HTML.")
-        # Fallback: try getting all text from body if main-content fails
-        body = soup.find('body')
-        return body.get_text(separator='\n', strip=True) if body else None
+        # Optional Fallback: return body tag if needed, otherwise None
+        # return soup.find('body') 
+        return None
     
-    # Attempt to remove known navigation/irrelevant sections within main-content if necessary
-    # Example: Find and remove left nav if it's inside #main-content
-    # left_nav = main_content.select_one('.left-nav-class') # Replace with actual selector if needed
-    # if left_nav: 
-    #    left_nav.decompose()
+    # Optional: Remove known irrelevant sections directly from the tag
+    # e.g., left_nav = main_content_tag.select_one('.some-nav-class')
+    # if left_nav: left_nav.decompose()
 
-    return main_content.get_text(separator='\n', strip=True)
+    return main_content_tag
 
 def get_instructions_to_process(session: Session, limit: Optional[int] = None) -> List[FormInstruction]:
     """Gets FormInstruction records that haven't been processed yet."""
@@ -129,33 +129,57 @@ def get_instructions_to_process(session: Session, limit: Optional[int] = None) -
     else:
         return instructions_to_process
 
-def analyze_content_with_llm(content: str) -> Optional[List[dict]]:
-    """Uses the Gemini LLM chain to analyze content and extract form fields."""
+def analyze_content_with_llm(content: str, instruction_form_number: str = "Unknown") -> Optional[List[dict]]:
+    """Uses the Gemini LLM chain to analyze content and extract form fields.
+       Validates each extracted field JSON string individually.
+    """
     if not llm or not parser:
         # Error message now includes check for initialization failure
         logger.error("LLM or Parser not properly initialized. Cannot analyze content.")
         return None
         
+    # --- Log Input Content --- 
+    logger.debug(f"--- Analyzing Content for Form {instruction_form_number} (length: {len(content)}) ---")
+    # Log first/last N chars for brevity, or full content if debugging needed
+    # logger.debug(content) # Uncomment for full content logging if needed
+    logger.debug(f"CONTENT START: {content[:500]}...") 
+    logger.debug(f"...CONTENT END: ...{content[-500:]}") 
+    # -------------------------
+        
     # --- LangChain prompt and chain execution --- # 
     logger.debug("Starting LLM analysis...")
-    prompt_text = """Analyze the following IRS form instruction text. Identify each distinct line item or field explanation (e.g., starting with 'Line X.', 'Part Y.', 'Section Z:', etc.). 
-For each identified item, extract two pieces of information:
-1.  'field_label': The exact introductory label for the field, including the line number and title (e.g., "Line 1a. Testate estates.").
-2.  'full_text': The complete text associated with that field label, including the label itself and all explanatory paragraphs following it, up until the beginning of the next field label or the end of the relevant section.
+    # PROMPT: Ask for JSON object containing a list of objects
+    prompt_text = """You are an expert assistant analyzing IRS form instruction text.
+Your goal is to identify and extract distinct instructional items, typically corresponding to lines or specific sections on the associated tax form.
+
+Look for headings like 'Line X', 'Line Xa', 'Lines X-Y', 'Part Z', or specific named sections (e.g., 'Who Must File', 'Specific Instructions').
+
+For each distinct item identified, create a JSON object with two keys:
+1.  'field_label': The exact introductory label or heading for the item (e.g., "Line 1a. Testate estates.", "Who Must File", "Line 16"). Capture the complete label text as presented.
+2.  'full_text': The complete text associated *only* with that specific item, including the label/heading itself and all explanatory paragraphs belonging to it, stopping before the next distinct item's label/heading begins.
+
+Output ONLY a single JSON object with one key, "fields", which contains a standard JSON list of the JSON objects you created for each item.
+
+Example:
+`{{
+  "fields": [
+    {{"field_label": "Line 1a. Testate estates.", "full_text": "Line 1a. Testate estates. Check the box..."}},
+    {{"field_label": "Line 1b. Intestate estates.", "full_text": "Line 1b. Intestate estates. Check the box..."}}
+  ]
+}}`
 
 {format_instructions}
 
-Instruction Text:
+Instruction Text to Analyze:
 --- BEGIN TEXT ---
 {instruction_text}
 --- END TEXT ---
 
-Extracted Fields:"""
+JSON object with extracted fields:"""
     
     try:
         prompt = ChatPromptTemplate.from_template(prompt_text)
-        # Ensure Gemini gets appropriate roles if needed, or use `convert_system_message_to_human=True` during init
-        chain = prompt | llm | parser
+        chain = prompt | llm | parser # Parser now expects InstructionAnalysisOutput
         
         # Slice content if too long? Gemini might have token limits.
         # Consider chunking or summarizing if necessary for very long instructions.
@@ -164,51 +188,151 @@ Extracted Fields:"""
         #    logger.warning(f"Content length ({len(content)}) might exceed token limit. Truncating.")
         #    content = content[:max_tokens * 4] 
             
+        # LLM should return an object parseable into InstructionAnalysisOutput
         result: InstructionAnalysisOutput = chain.invoke({
             "instruction_text": content,
             "format_instructions": parser.get_format_instructions()
         })
-        logger.debug(f"LLM analysis complete. Found {len(result.fields)} potential fields.")
-        # Convert Pydantic models back to dictionaries for saving
-        return [field.dict() for field in result.fields]
+        logger.debug(f"LLM analysis and parsing complete. Found {len(result.fields)} fields.")
+
+        # Convert the validated Pydantic objects (result.fields) to dictionaries
+        return [field.model_dump() for field in result.fields]
+
+    except OutputParserException as ope: # Catch if parsing InstructionAnalysisOutput fails
+        logger.error(f"Failed to parse LLM output into InstructionAnalysisOutput: {ope}")
+        return None
     except Exception as e:
-        logger.error(f"Error during LLM analysis chain execution: {e}", exc_info=True)
+        logger.error(f"Error during LLM analysis chain execution or validation: {e}", exc_info=True)
         return None
     # --- End Chain Execution ---
 
+def chunk_by_html_headings(main_content_tag: Optional[Tag], max_chars: int = 20000) -> List[str]:
+    """Chunks HTML content based on heading tags (h2, h3, h4) within the main content.
+
+    Args:
+        main_content_tag: The BeautifulSoup Tag object for the main content area (e.g., <div id='main-content'>).
+        max_chars: The target maximum character length for each chunk.
+
+    Returns:
+        A list of text chunks, where each chunk starts with a heading.
+    """
+    if not main_content_tag:
+        return []
+
+    chunks = []
+    current_chunk_elements = []
+    current_chunk_len = 0
+    heading_tags = ['h2', 'h3', 'h4'] # Consider h1? Adjust as needed.
+
+    # Iterate through direct children or all relevant elements within main_content
+    for element in main_content_tag.find_all(heading_tags + ['p', 'div', 'ul', 'ol', 'table'], recursive=False): # Adjust tags as needed
+        element_text = element.get_text(separator='\n', strip=True)
+        element_len = len(element_text)
+
+        is_heading = element.name in heading_tags
+
+        # If it's a heading OR adding the current element exceeds max length,
+        # AND we have content in the current chunk, finalize the current chunk.
+        if (is_heading or (current_chunk_len + element_len > max_chars)) and current_chunk_elements:
+            # Extract text from the collected elements for the chunk
+            chunk_text = "\n\n".join(el.get_text(separator='\n', strip=True) for el in current_chunk_elements).strip()
+            if chunk_text:
+                 chunks.append(chunk_text)
+            current_chunk_elements = []
+            current_chunk_len = 0
+
+        # Handle elements larger than max_chars (split their text content)
+        if element_len > max_chars:
+            logger.warning(f"Single element <{element.name}> exceeds max_chars ({element_len} > {max_chars}). Splitting element text.")
+            # Add any previous chunk first
+            if current_chunk_elements:
+                chunk_text = "\n\n".join(el.get_text(separator='\n', strip=True) for el in current_chunk_elements).strip()
+                if chunk_text:
+                    chunks.append(chunk_text)
+                current_chunk_elements = []
+                current_chunk_len = 0
+            # Split the large element's text
+            start = 0
+            while start < element_len:
+                end = start + max_chars
+                chunks.append(element_text[start:end])
+                start = end
+            continue # Skip adding this oversized element below
+
+        # Start a new chunk if this is a heading (even if current chunk is empty)
+        if is_heading:
+            current_chunk_elements = [element]
+            current_chunk_len = element_len
+        # Otherwise, add non-heading element to the current chunk
+        elif element_text: # Add only if element has text
+            current_chunk_elements.append(element)
+            current_chunk_len += element_len + 2 # Add 2 for potential \n\n joiner
+
+    # Add the last remaining chunk
+    if current_chunk_elements:
+        chunk_text = "\n\n".join(el.get_text(separator='\n', strip=True) for el in current_chunk_elements).strip()
+        if chunk_text:
+            chunks.append(chunk_text)
+
+    logger.info(f"Chunked content by HTML headings into {len(chunks)} chunks.")
+    return chunks
+
 def process_instruction(instruction: FormInstruction, session: Session):
-    """Fetches, analyzes, and saves fields for a single instruction."""
+    """Fetches, chunks by HTML headings, analyzes, and saves fields."""
     logger.info(f"Processing: {instruction.title} (ID: {instruction.id}, Form: {instruction.form_number}) - {instruction.html_url}")
     
     soup = fetch_and_parse_html(instruction.html_url)
     if not soup:
-        return # Skip if fetching/parsing failed
-        
-    main_content = extract_main_content(soup)
-    if not main_content or len(main_content) < 100: # Basic check for meaningful content
-        logger.warning(f"Could not extract sufficient main content from {instruction.html_url}. Skipping.")
         return
         
-    # Analyze content with LLM
-    extracted_fields = analyze_content_with_llm(main_content)
+    # Get the main content Tag object
+    main_content_tag = extract_main_content(soup)
+    if not main_content_tag:
+        logger.warning(f"Could not extract main content tag from {instruction.html_url}. Skipping.")
+        return
+        
+    # --- Chunking Step using HTML --- 
+    content_chunks = chunk_by_html_headings(main_content_tag, max_chars=20000) 
+    if not content_chunks:
+        logger.warning(f"HTML content chunking resulted in zero chunks for {instruction.html_url}. Skipping.")
+        return
+        
+    all_valid_fields = [] # Aggregate results from all chunks
+    analysis_failed = False
     
-    if extracted_fields is None: # Indicates an error during analysis
-        logger.error(f"LLM analysis failed for {instruction.form_number}. Skipping saving.")
+    # --- Process Chunks --- 
+    logger.info(f"Processing content in {len(content_chunks)} chunk(s) for {instruction.form_number}.")
+    for i, chunk in enumerate(content_chunks):
+        logger.debug(f"Analyzing chunk {i+1}/{len(content_chunks)} (length: {len(chunk)} chars)")
+        # Analyze content chunk with LLM - PASS FORM NUMBER
+        validated_fields_from_chunk = analyze_content_with_llm(chunk, instruction.form_number)
+        
+        if validated_fields_from_chunk is None: # Indicates an error during analysis for this chunk
+            logger.error(f"LLM analysis failed for chunk {i+1} of {instruction.form_number}. Skipping further analysis for this instruction.")
+            analysis_failed = True
+            break # Stop processing chunks for this instruction if one fails
+            
+        if validated_fields_from_chunk:
+            all_valid_fields.extend(validated_fields_from_chunk)
+            logger.debug(f"Added {len(validated_fields_from_chunk)} fields from chunk {i+1}.")
+        else:
+            logger.debug(f"Chunk {i+1} yielded no valid fields.")
+    # --- End Chunk Processing ---
+    
+    # If analysis failed for any chunk, don't save anything for this instruction
+    if analysis_failed:
+        logger.error(f"Skipping save for {instruction.form_number} due to analysis failure in one or more chunks.")
+        return
+                
+    if not all_valid_fields:
+        logger.warning(f"LLM did not extract any valid/complete fields for {instruction.form_number} after processing all chunks.")
         return
         
-    if not extracted_fields:
-        logger.warning(f"LLM did not extract any fields for {instruction.form_number}.")
-        return
-        
-    # Save extracted fields to database
+    # Save ALL valid extracted fields to database
     saved_count = 0
     try:
-        for field_data in extracted_fields:
-            # Add validation here if needed (e.g., check label format)
-            if not field_data.get('field_label') or not field_data.get('full_text'):
-                logger.warning(f"LLM returned incomplete field data: {field_data}. Skipping field.")
-                continue
-
+        logger.info(f"Attempting to save {len(all_valid_fields)} aggregated fields for form {instruction.form_number}.")
+        for field_data in all_valid_fields: # Iterate over the aggregated list
             new_field = FormField(
                 instruction_id=instruction.id,
                 field_label=field_data['field_label'],
@@ -217,8 +341,8 @@ def process_instruction(instruction: FormInstruction, session: Session):
             session.add(new_field)
             saved_count += 1
             
-        session.commit() # Commit fields for this instruction
-        logger.info(f"Successfully saved {saved_count} fields for form {instruction.form_number}.")
+        session.commit() # Commit all fields for this instruction together
+        logger.info(f"Successfully saved {saved_count} validated fields for form {instruction.form_number}.")
         
     except Exception as e:
         logger.error(f"Database error saving fields for form {instruction.form_number}: {e}")
