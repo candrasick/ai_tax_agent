@@ -1,4 +1,4 @@
-.PHONY: db-migrate download-bulletins analyze-size analyze-mentions parse-tax-code parse-tax-code-custom analyze-amendments analyze-amendments-limit visualize-amendments parse-bulletins parse-bulletins-clear link-bulletins link-bulletins-clear test test-unit test-integration test-db-integrity test-form-integrity scrape-instructions scrape-instructions-clear extract-form-fields extract-form-fields-clear extract-form-fields-llm extract-form-fields-llm-limit index-sections index-sections-clear index-instructions index-instructions-clear test-chroma-integrity parse-pdf-layout
+.PHONY: db-migrate download-bulletins analyze-size analyze-mentions parse-tax-code parse-tax-code-custom analyze-amendments analyze-amendments-limit visualize-amendments parse-bulletins parse-bulletins-clear link-bulletins link-bulletins-clear test test-unit test-integration test-db-integrity test-form-integrity scrape-instructions scrape-instructions-clear extract-form-fields extract-form-fields-clear extract-form-fields-llm extract-form-fields-llm-limit index-sections index-sections-clear index-instructions index-instructions-clear test-chroma-integrity analyze-mcid test-chroma-indexing lint
 
 db-migrate:
 	@echo "Applying database migrations..."
@@ -67,8 +67,7 @@ link-bulletins-clear:
 	poetry run python scripts/link_bulletins_to_sections.py --clear
 	@echo "Linking complete."
 
-test:
-	@echo "Running all tests..."
+test: test-unit test-integration test-db-integrity test-form-integrity test-chroma-integrity
 
 test-unit:
 	@echo "Running unit tests..."
@@ -141,6 +140,13 @@ test-chroma-integrity:
 	@echo "Running ChromaDB integrity tests..."
 	poetry run pytest tests/integration/test_chroma_integrity.py -v
 
-parse-pdf-layout: ## Parse PDF layout elements (use ARGUMENTS="path/to/file.pdf --page N")
-	@echo "Parsing PDF layout with arguments: $(ARGUMENTS)"
-	poetry run python scripts/parse_pdf_layout.py $(ARGUMENTS) 
+analyze-mcid:
+	@echo "Analyzing PDF MCIDs with arguments: $(ARGUMENTS)"
+	poetry run python scripts/analyze_pdf_mcid.py $(ARGUMENTS)
+
+# Test ChromaDB instruction indexing
+test-chroma-indexing:
+	poetry run pytest tests/integration/test_chroma_instruction_indexing.py -s
+
+lint:
+	poetry run ruff check .
