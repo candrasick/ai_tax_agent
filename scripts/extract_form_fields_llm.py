@@ -92,21 +92,6 @@ def fetch_and_parse_html(url: str) -> Optional[BeautifulSoup]:
         logger.error(f"Error parsing HTML from {url}: {e}")
         return None
 
-def extract_main_content(soup: BeautifulSoup) -> Optional[Tag]:
-    """Extracts the BeautifulSoup Tag for the main content area."""
-    main_content_tag = soup.select_one('#main-content')
-    if not main_content_tag:
-        logger.warning("Could not find <div id='main-content'> in the HTML.")
-        # Optional Fallback: return body tag if needed, otherwise None
-        # return soup.find('body') 
-        return None
-    
-    # Optional: Remove known irrelevant sections directly from the tag
-    # e.g., left_nav = main_content_tag.select_one('.some-nav-class')
-    # if left_nav: left_nav.decompose()
-
-    return main_content_tag
-
 def get_instructions_to_process(session: Session, limit: Optional[int] = None) -> List[FormInstruction]:
     """Gets FormInstruction records that haven't been processed yet."""
     query = session.query(FormInstruction)\
@@ -205,77 +190,6 @@ JSON object with extracted fields:"""
         logger.error(f"Error during LLM analysis chain execution or validation: {e}", exc_info=True)
         return None
     # --- End Chain Execution ---
-
-def chunk_by_html_headings(main_content_tag: Optional[Tag], max_chars: int = 20000) -> List[str]:
-    """Chunks HTML content based on heading tags (h2, h3, h4) within the main content.
-
-    Args:
-        main_content_tag: The BeautifulSoup Tag object for the main content area (e.g., <div id='main-content'>).
-        max_chars: The target maximum character length for each chunk.
-
-    Returns:
-        A list of text chunks, where each chunk starts with a heading.
-    """
-    if not main_content_tag:
-        return []
-
-    chunks = []
-    current_chunk_elements = []
-    current_chunk_len = 0
-    heading_tags = ['h2', 'h3', 'h4'] # Consider h1? Adjust as needed.
-
-    # Iterate through direct children or all relevant elements within main_content
-    for element in main_content_tag.find_all(heading_tags + ['p', 'div', 'ul', 'ol', 'table'], recursive=False): # Adjust tags as needed
-        element_text = element.get_text(separator='\n', strip=True)
-        element_len = len(element_text)
-
-        is_heading = element.name in heading_tags
-
-        # If it's a heading OR adding the current element exceeds max length,
-        # AND we have content in the current chunk, finalize the current chunk.
-        if (is_heading or (current_chunk_len + element_len > max_chars)) and current_chunk_elements:
-            # Extract text from the collected elements for the chunk
-            chunk_text = "\n\n".join(el.get_text(separator='\n', strip=True) for el in current_chunk_elements).strip()
-            if chunk_text:
-                 chunks.append(chunk_text)
-            current_chunk_elements = []
-            current_chunk_len = 0
-
-        # Handle elements larger than max_chars (split their text content)
-        if element_len > max_chars:
-            logger.warning(f"Single element <{element.name}> exceeds max_chars ({element_len} > {max_chars}). Splitting element text.")
-            # Add any previous chunk first
-            if current_chunk_elements:
-                chunk_text = "\n\n".join(el.get_text(separator='\n', strip=True) for el in current_chunk_elements).strip()
-                if chunk_text:
-                    chunks.append(chunk_text)
-                current_chunk_elements = []
-                current_chunk_len = 0
-            # Split the large element's text
-            start = 0
-            while start < element_len:
-                end = start + max_chars
-                chunks.append(element_text[start:end])
-                start = end
-            continue # Skip adding this oversized element below
-
-        # Start a new chunk if this is a heading (even if current chunk is empty)
-        if is_heading:
-            current_chunk_elements = [element]
-            current_chunk_len = element_len
-        # Otherwise, add non-heading element to the current chunk
-        elif element_text: # Add only if element has text
-            current_chunk_elements.append(element)
-            current_chunk_len += element_len + 2 # Add 2 for potential \n\n joiner
-
-    # Add the last remaining chunk
-    if current_chunk_elements:
-        chunk_text = "\n\n".join(el.get_text(separator='\n', strip=True) for el in current_chunk_elements).strip()
-        if chunk_text:
-            chunks.append(chunk_text)
-
-    logger.info(f"Chunked content by HTML headings into {len(chunks)} chunks.")
-    return chunks
 
 def process_instruction(instruction: FormInstruction, session: Session):
     """Fetches, chunks by HTML headings, analyzes, and saves fields."""

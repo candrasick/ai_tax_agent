@@ -1,4 +1,4 @@
-.PHONY: db-migrate download-bulletins analyze-size analyze-mentions parse-tax-code parse-tax-code-custom analyze-amendments analyze-amendments-limit visualize-amendments parse-bulletins parse-bulletins-clear link-bulletins link-bulletins-clear test test-unit test-integration test-db-integrity test-form-integrity scrape-instructions scrape-instructions-clear extract-form-fields extract-form-fields-clear extract-form-fields-llm extract-form-fields-llm-limit
+.PHONY: db-migrate download-bulletins analyze-size analyze-mentions parse-tax-code parse-tax-code-custom analyze-amendments analyze-amendments-limit visualize-amendments parse-bulletins parse-bulletins-clear link-bulletins link-bulletins-clear test test-unit test-integration test-db-integrity test-form-integrity scrape-instructions scrape-instructions-clear extract-form-fields extract-form-fields-clear extract-form-fields-llm extract-form-fields-llm-limit index-sections index-sections-clear index-instructions index-instructions-clear test-chroma-integrity
 
 db-migrate:
 	@echo "Applying database migrations..."
@@ -119,4 +119,24 @@ extract-form-fields-llm-limit:
 	@echo "Extracting form fields using LLM (limited)..."
 	@read -p "Enter the maximum number of forms to process: " limit; \
 	poetry run python scripts/extract_form_fields_llm.py --limit $$limit
-	@echo "Limited LLM extraction complete." 
+	@echo "Limited LLM extraction complete."
+
+index-sections:
+	@echo "Indexing U.S. Code sections into ChromaDB (incremental)..."
+	poetry run python scripts/index_sections_chroma.py
+
+index-sections-clear:
+	@echo "Clearing and re-indexing U.S. Code sections into ChromaDB..."
+	poetry run python scripts/index_sections_chroma.py --clear
+
+index-instructions:
+	@echo "Indexing form instructions into ChromaDB (incremental)..."
+	poetry run python scripts/index_instructions_chroma.py
+
+index-instructions-clear:
+	@echo "Clearing and re-indexing form instructions into ChromaDB..."
+	poetry run python scripts/index_instructions_chroma.py --clear
+
+test-chroma-integrity:
+	@echo "Running ChromaDB integrity tests..."
+	poetry run pytest tests/integration/test_chroma_integrity.py -v 
