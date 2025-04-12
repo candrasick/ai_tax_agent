@@ -16,6 +16,16 @@ import json
 # project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # sys.path.insert(0, project_root)
 
+# --- Add project root to sys.path to allow importing ai_tax_agent --- 
+project_root_path = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if project_root_path not in sys.path:
+    sys.path.insert(0, project_root_path)
+
+from ai_tax_agent.parsers.pdf_parser_utils import (
+    extract_amounts_by_color,
+    extract_form_schedule_titles,
+)
+
 def display_page(mcid_groups, page_number, items_per_page=5):
     """Displays MCID groups for a specific page with pagination."""
     mcids = sorted(mcid_groups.keys())
@@ -161,43 +171,23 @@ def analyze_pdf_fonts(pdf_path, page_num_one_indexed):
             print(f"Analyzing PDF: '{os.path.basename(pdf_path)}', Page: {page_num_one_indexed}")
 
             # Group characters by font properties
-            amount_color_tuple = (0, 0, 0.5) # Assuming alpha is not relevant or always 1
-            amount_list = []
-            text_font_groups = defaultdict(list)
+            AMOUNT_COLOR_TUPLE = (0, 0, 0.5) # Target color for amounts
+            MIN_HEADER_FONT_SIZE = 7.0 # Minimum size to be considered a header
+
+            header_font_groups = defaultdict(list)
+            body_font_groups = defaultdict(list)
 
             # --- Extract Amount Words using Word Extraction --- 
-            # Extract words with necessary attributes
-            words = page.extract_words(extra_attrs=['fontname', 'size', 'non_stroking_color'])
-            amount_char_indices = set() # Keep track of chars belonging to amounts
-
-            for word in words:
-                # Check color - handle potential minor float variations if necessary
-                word_color = word.get('non_stroking_color')
-                # Simple comparison, adjust if color varies slightly (e.g., check proximity)
-                is_amount_word = False
-                if isinstance(word_color, tuple) and len(word_color) >= 3: # Check if tuple and has RGB
-                    if (abs(word_color[0] - amount_color_tuple[0]) < 0.01 and
-                        abs(word_color[1] - amount_color_tuple[1]) < 0.01 and
-                        abs(word_color[2] - amount_color_tuple[2]) < 0.01):
-                        is_amount_word = True
-
-                if is_amount_word:
-                    amount_list.append({
-                        "amount": word['text'],
-                        "position": (word['x0'], word['top'], word['x1'], word['bottom'])
-                    })
-                    # Mark characters within this word as processed (if possible/needed - pdfplumber words don't directly link back to chars)
-                    # We will filter chars later based on color instead.
-
+            amount_list = extract_amounts_by_color(page, AMOUNT_COLOR_TUPLE)
 
             # --- Group Remaining Text Characters --- 
             for char in page.chars:
                 char_color = char.get('non_stroking_color')
                 is_amount_char = False
                 if isinstance(char_color, tuple) and len(char_color) >= 3:
-                    if (abs(char_color[0] - amount_color_tuple[0]) < 0.01 and
-                        abs(char_color[1] - amount_color_tuple[1]) < 0.01 and
-                        abs(char_color[2] - amount_color_tuple[2]) < 0.01):
+                    if (abs(char_color[0] - AMOUNT_COLOR_TUPLE[0]) < 0.01 and
+                        abs(char_color[1] - AMOUNT_COLOR_TUPLE[1]) < 0.01 and
+                        abs(char_color[2] - AMOUNT_COLOR_TUPLE[2]) < 0.01):
                         is_amount_char = True
 
                 # Only process characters not identified as part of an amount
@@ -208,20 +198,27 @@ def analyze_pdf_fonts(pdf_path, page_num_one_indexed):
                     rounded_size = round(size, 1) if size is not None else None
 
                     # Use rounded size in the key
-                    font_key = (font, rounded_size, color)
-                    text_font_groups[font_key].append(char)
+                    group_key = (font, rounded_size, color)
 
-            if not text_font_groups and not amount_list:
+                    # Separate into header/body based on font size
+                    if rounded_size is not None and rounded_size >= MIN_HEADER_FONT_SIZE:
+                        header_font_groups[group_key].append(char)
+                    else:
+                        body_font_groups[group_key].append(char)
+
+            if not header_font_groups and not body_font_groups and not amount_list:
                 print(f"No characters found on page {page_num_one_indexed}.")
                 return
 
             # Prepare JSON output
-            text_elements_list = []
-            # Sort groups for consistent output (optional, sorting by font name then size)
-            sorted_keys = sorted(text_font_groups.keys(), key=lambda k: (k[0] or "", k[1] or 0))
+            header_elements_list = []
+            body_elements_list = []
 
-            for key in sorted_keys:
-                chars_in_group = text_font_groups[key]
+            # Sort groups for consistent output (optional, sorting by font name then size)
+            sorted_header_keys = sorted(header_font_groups.keys(), key=lambda k: (k[0] or "", k[1] or 0))
+
+            for key in sorted_header_keys:
+                chars_in_group = header_font_groups[key]
                 font, rounded_size, color = key
                 text = "".join(c['text'] for c in chars_in_group)
 
@@ -238,7 +235,7 @@ def analyze_pdf_fonts(pdf_path, page_num_one_indexed):
                 else:
                     group_bbox = None # Should not happen if key exists
 
-                text_elements_list.append({
+                header_elements_list.append({
                     "font": font,
                     "font_size": rounded_size, # Use rounded size
                     "font_color": color_str,
@@ -246,10 +243,45 @@ def analyze_pdf_fonts(pdf_path, page_num_one_indexed):
                     "position": group_bbox
                 })
 
+            # --- Process Body Groups --- 
+            sorted_body_keys = sorted(body_font_groups.keys(), key=lambda k: (k[0] or "", k[1] or 0))
+
+            for key in sorted_body_keys:
+                chars_in_group = body_font_groups[key]
+                font, rounded_size, color = key
+                text = "".join(c['text'] for c in chars_in_group)
+
+                # Format color nicely for JSON
+                color_str = repr(color) # Simple string representation
+
+                # Calculate bounding box for the group
+                if chars_in_group:
+                    min_x0 = min(c['x0'] for c in chars_in_group)
+                    min_y0 = min(c['top'] for c in chars_in_group)
+                    max_x1 = max(c['x1'] for c in chars_in_group)
+                    max_y1 = max(c['bottom'] for c in chars_in_group)
+                    group_bbox = (min_x0, min_y0, max_x1, max_y1)
+                else:
+                    group_bbox = None # Should not happen if key exists
+
+                body_elements_list.append({
+                    "font": font,
+                    "font_size": rounded_size, # Use rounded size
+                    "font_color": color_str,
+                    "text": text.strip(),
+                    "position": group_bbox
+                })
+
+            # --- Extract Form/Schedule Titles from Headers --- 
+            title_info = extract_form_schedule_titles(header_elements_list)
+
             # Print the final JSON output
             final_output = {
+                "form_title": title_info["form_title"],
+                "schedule_title": title_info["schedule_title"],
                 "amounts": amount_list,
-                "text_elements": text_elements_list
+                "body_elements": body_elements_list # Keep body elements
+                # header_elements are not included in final output, only used for title extraction
             }
             print(json.dumps(final_output, indent=4))
 
