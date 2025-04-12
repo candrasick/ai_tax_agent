@@ -187,7 +187,9 @@ def analyze_pdf_structure(pdf_path, page_num_one_indexed):
             amounts = extract_amounts_by_color(page, amount_color_tuple=AMOUNT_COLOR)
 
             # --- Determine overall context --- 
-            amount_unit = determine_amount_unit(header_phrases)
+            # Combine header and body phrases for unit determination
+            all_phrases_for_unit = header_phrases + body_phrases
+            amount_unit = determine_amount_unit(all_phrases_for_unit)
 
             # --- Associate labels to line items --- 
             # Use body phrases for labels, as headers are usually titles/instructions

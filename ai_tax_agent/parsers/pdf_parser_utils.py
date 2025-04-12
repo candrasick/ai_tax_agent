@@ -119,13 +119,13 @@ def extract_form_schedule_titles(
 
     return {"form_title": form_title, "schedule_title": schedule_title}
 
-def determine_amount_unit(header_elements: List[Dict[str, Any]]) -> AmountUnit:
+def determine_amount_unit(all_text_phrases: List[Dict[str, Any]]) -> AmountUnit:
     """Determines the unit type (dollars, individuals, forms) based on header text.
 
     Searches for specific phrases within the text of header elements.
 
     Args:
-        header_elements: A list of dictionaries representing header text elements.
+        all_text_phrases: A list of dictionaries representing text phrases (headers + body).
 
     Returns:
         An AmountUnit enum member indicating the determined unit type.
@@ -135,8 +135,8 @@ def determine_amount_unit(header_elements: List[Dict[str, Any]]) -> AmountUnit:
     dollars_pattern = re.compile(r"Amount\s+of\s+selected\s+lines", re.IGNORECASE)
     forms_pattern = re.compile(r"Number\s+of\s+Forms", re.IGNORECASE)
 
-    for element in header_elements:
-        text = element.get('text', '')
+    for element in all_text_phrases:
+        text = element.get('phrase', '') # Expecting phrase text now
         if not text:
             continue
 
