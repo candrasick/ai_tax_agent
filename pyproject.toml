@@ -27,7 +27,8 @@ dependencies = [
     "chromadb (>=0.5.4)",
     "onnxruntime (==1.18.0)",
     "pdfplumber (>=0.11.6,<0.12.0)",
-    "html5lib (>=1.1,<2.0)"
+    "html5lib (>=1.1,<2.0)",
+    "pillow (>=11.2.1,<12.0.0)"
 ]
 
 

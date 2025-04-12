@@ -7,6 +7,16 @@ from enum import Enum
 import math # Import math for distance calculation
 import os
 import logging
+import json # Added JSON import
+from io import BytesIO # For image conversion
+import base64 # For image encoding
+
+# Langchain / LLM imports
+from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_google_genai import ChatGoogleGenerativeAI
+
+# Assume settings are accessible for API key
+from ai_tax_agent.settings import settings
 
 # Define Enum for amount units
 class AmountUnit(Enum):
@@ -355,77 +365,136 @@ def associate_line_labels(
         })
     return labeled_lines
 
-def associate_amounts_to_lines(
+def associate_amounts_multimodal(
+    page: pdfplumber.page.Page,
     labeled_lines: List[Dict[str, Any]],
     amounts: List[Dict[str, Any]],
-    page_height: float, # Needed for distance normalization/thresholding
-    max_distance_factor: float = 0.15 # Factor of page height for proximity
-) -> Dict[str, str]:
-    """Associates amounts with the closest 'up-and-left' labeled line item.
+    # Add model name parameter if needed
+    model_name: str = "gemini-1.5-flash-latest"
+) -> Dict[str, Optional[str]]:
+    """Associates amounts with line items using a multimodal LLM.
 
     Args:
-        labeled_lines: List of dictionaries containing line item numbers and their labels.
-        amounts: List of dictionaries containing amounts and their positions.
-        page_height: Height of the PDF page for distance normalization.
-        max_distance_factor: Factor of page height for proximity threshold.
+        page: The pdfplumber Page object.
+        labeled_lines: List of dicts with 'line_item_number', 'label', 'combined_position'.
+        amounts: List of dicts with 'amount' and 'position'.
+        model_name: The name of the multimodal model to use.
 
     Returns:
-        A dictionary mapping line_item_number to amount_text.
+        A dictionary mapping line_item_number (str) to amount_text (str or None).
     """
-    amount_map = {} # Maps line_item_number -> amount_text
+    amount_map = {} 
+    # Initialize all line items with None amount
+    for line_data in labeled_lines:
+        if line_data.get("label") is not None: # Only consider lines with labels
+            amount_map[line_data['line_item_number']] = None 
 
-    # Filter labeled_lines to only those with a combined_position for association
-    valid_lines = [line for line in labeled_lines if line.get("combined_position")]
-    # Create a list of amounts not yet assigned
-    available_amounts = list(amounts)
+    if not amounts: # No amounts found on page
+        logging.info("No amounts found on page, skipping multimodal association.")
+        return amount_map
 
-    # Iterate through lines, finding the best amount for each
-    for line_data in valid_lines:
-        line_pos = line_data['combined_position'] # (x0, top, x1, bottom)
-        line_v_center = (line_pos[1] + line_pos[3]) / 2
+    try:
+        # 1. Convert page to image
+        img = page.to_image(resolution=150) # Use adequate resolution
+        buffer = BytesIO()
+        img.save(buffer, format="PNG")
+        img_base64 = base64.b64encode(buffer.getvalue()).decode('utf-8')
+        img_data_uri = f"data:image/png;base64,{img_base64}"
 
-        # --- DEBUG: Use large tolerance initially --- 
-        vertical_tolerance = 100.0 # Large fixed tolerance for debugging
-        # line_height = line_pos[3] - line_pos[1]
-        # vertical_tolerance = max(line_height / 2, 3.0)
-        print(f"\nProcessing Line: {line_data['line_item_number']} '{line_data['label'][:30]}...' (v_center: {line_v_center:.2f}, tol: {vertical_tolerance:.2f})")
+        # 2. Prepare input data for prompt (only essential info)
+        prompt_lines = []
+        for line in labeled_lines:
+             if line.get("label") is not None: # Ensure label exists
+                prompt_lines.append({
+                    "ln": line['line_item_number'],
+                    "lbl": line['label'],
+                    # Simplify position for prompt clarity? Use combined or line item?
+                    "pos": line.get('combined_position') or line.get('line_item_position')
+                })
 
-        best_match_amount_data = None
-        min_v_distance = float('inf')
+        prompt_amounts = []
+        for amount in amounts:
+             prompt_amounts.append({
+                 "amt": amount['amount'],
+                 "pos": amount['position']
+             })
 
-        # Search through amounts that haven't been assigned yet
-        for i, amount_data in enumerate(available_amounts):
-            amount_pos = amount_data['position'] # (x0, top, x1, bottom)
-            amount_v_center = (amount_pos[1] + amount_pos[3]) / 2
+        # 3. Construct Prompt
+        system_prompt = "You are an expert assistant analyzing PDF form structures. Your task is to associate numeric amounts with the correct line item based on their positions in the provided image and data."
+        human_prompt_text = f"""
+Analyze the provided image of a form page.
+Here is a list of identified line items with their labels and approximate bounding boxes [x0, y0, x1, y1]:
+```json
+{json.dumps(prompt_lines, indent=2)}
+```
 
-            # Check 1: Amount must be to the right of the combined label/number block
-            if amount_pos[0] > line_pos[2]:
-                # Check 2: Calculate vertical distance
-                print(f"  Considering Amount: '{amount_data['amount']}' (v_center: {amount_v_center:.2f}, v_dist: {v_distance:.2f})")
-                v_distance = abs(amount_v_center - line_v_center)
+Here is a list of identified numeric amounts and their bounding boxes:\n```json\n{json.dumps(prompt_amounts, indent=2)}\n```\n\n+Note: These numeric amounts often appear in a distinct blue color in the image.\n\nBased on the visual layout in the image, associate each amount with the single most likely line item number it corresponds to. Consider typical form layouts where amounts appear in columns to the right of or below labels.\n\nOutput ONLY a JSON object mapping the line_item_number (string) to the corresponding amount (string). \nIf a line item number from the input list does not have an associated amount in the image, its value should be null in the output JSON. \nIf an amount cannot be confidently associated with any line item, omit it from the output map.\n-Example output format: {{"1\": \"123,456\", \"2a\": \"789\", \"3\": null, ...}}\n+Example output format: {{"1\": \"123,456\", \"2a\": \"789\", \"3\": null, ...}} <-- Ensure double braces here
+"""
 
-                # Check 3: Is it within vertical tolerance and the closest found so far?
-                if v_distance < vertical_tolerance and v_distance < min_v_distance:
-                    min_v_distance = v_distance
-                    best_match_amount_data = amount_data
-                    # Store index to remove later if assigning one amount per line
-                    # best_match_amount_index = i 
-        print(f"  -> Best Match: '{best_match_amount_data['amount'] if best_match_amount_data else 'None'}' (min_v_dist: {min_v_distance if min_v_distance != float('inf') else 'N/A'})" )
+        # Create the message for the LLM
+        message = HumanMessage(
+            content=[
+                {"type": "text", "text": human_prompt_text},
+                {
+                    "type": "image_url",
+                    "image_url": {"url": img_data_uri},
+                },
+            ]
+        )
 
-        # Assign the best match found for this line
-        if best_match_amount_data:
-            # Avoid overwriting if multiple amounts map to the same line?
-            # Current logic: last amount found wins. Could collect lists instead.
-            # Assign amount to the current line item number
-            amount_map[line_data['line_item_number']] = best_match_amount_data['amount']
-            # Optimization: Remove the assigned amount so it can't be assigned again
-            # This assumes one amount per line. Adjust if amounts can align with multiple lines.
-            # DEBUG: Temporarily disable removing amounts to see all potential matches
-            # try: 
-            #     available_amounts.remove(best_match_amount_data)
-            # except ValueError: 
-            #      pass 
+        # 4. Initialize and Call LLM
+        llm = ChatGoogleGenerativeAI(model=model_name, google_api_key=settings.gemini_api_key, temperature=0.1)
+        logging.info(f"Calling multimodal LLM ({model_name}) for amount association...")
+        response = llm.invoke([SystemMessage(content=system_prompt), message])
+        response_content = response.content
+        logging.info(f"LLM Response received: {response_content[:200]}...") # Log snippet
 
+        # 5. Parse Response
+        # Expecting a JSON string within the response content
+        try:
+            # Attempt to find JSON block within potential markdown
+            logging.debug(f"Attempting to find JSON in LLM response:\n{response_content}")
+            json_match = re.search(r"```json\s*\n?(.*?)\n?\s*```", response_content, re.DOTALL | re.IGNORECASE)
+            parsed_map = None
+
+            if json_match:
+                json_string = json_match.group(1).strip()
+                logging.debug(f"Found JSON block, attempting to parse: {json_string[:100]}...")
+                if json_string:
+                    try:
+                        parsed_map = json.loads(json_string)
+                    except json.JSONDecodeError as e:
+                        logging.error(f"Failed to parse extracted JSON string: {e}\nString: {json_string}")
+                else:
+                    logging.warning("Regex matched JSON block, but captured string was empty.")
+            else:
+                logging.warning("Could not find JSON block ```json...``` in response. Attempting to parse entire response.")
+                # Try parsing directly if no markdown found
+                try:
+                    parsed_map = json.loads(response_content.strip())
+                except json.JSONDecodeError as e:
+                    logging.error(f"Failed to parse entire LLM response as JSON: {e}\nResponse: {response_content}")
+            
+            # Validate and update the initial amount_map
+            if parsed_map and isinstance(parsed_map, dict):
+                 for ln, amt in parsed_map.items():
+                     if ln in amount_map: # Check if it's a valid line number from input
+                          amount_map[ln] = amt # Update with LLM result (could be str or None)
+                 logging.info("Successfully parsed amount map from LLM response.")
+            else:
+                if parsed_map is not None:
+                     logging.error(f"Parsed LLM response was not a valid dictionary: type={type(parsed_map)}, content={str(parsed_map)[:200]}...")
+                # Error already logged if parsing failed
+
+        except Exception as e:
+            logging.error(f"Error processing LLM response: {e}\nResponse: {response_content}")
+
+    except ImportError:
+         logging.error("Pillow library not found. Please install it (`pip install Pillow`) for image processing.")
+    except Exception as e:
+        logging.error(f"An error occurred during multimodal amount association: {e}", exc_info=True)
+
+    # Return the map, potentially partially filled or empty if errors occurred
     return amount_map
 
 # --- Main Orchestration Function --- 
@@ -498,7 +567,7 @@ def parse_pdf_page_structure(
             labeled_lines = associate_line_labels(line_items, body_phrases)
 
             # --- Associate amounts to labeled lines --- 
-            amount_map = associate_amounts_to_lines(labeled_lines, amounts, page.height, max_distance_factor=amount_proximity_factor)
+            amount_map = associate_amounts_multimodal(page, labeled_lines, amounts)
 
             # --- Build final output --- 
             output_line_items = []
@@ -532,4 +601,4 @@ def parse_pdf_page_structure(
 
     except Exception as e:
         logging.error(f"An error occurred during PDF processing for page {page_num_one_indexed}: {e}", exc_info=True)
-        return None 
+        return None
