@@ -27,7 +27,8 @@ from ai_tax_agent.parsers.pdf_parser_utils import (
     determine_amount_unit,
     AmountUnit,
     extract_phrases_and_line_items,
-    associate_line_items_with_labels,
+    associate_line_labels,
+    associate_amounts_to_lines,
 )
 
 def display_page(mcid_groups, page_number, items_per_page=5):
@@ -154,19 +155,8 @@ def display_page(mcid_groups, page_number, items_per_page=5):
              break
 
 
-def analyze_pdf_phrases(pdf_path, page_num_one_indexed, vertical_tolerance=2, horizontal_tolerance=5):
-    """Analyzes a PDF page to extract phrases and line items, printing the result as JSON.
-
-    Args:
-        pdf_path: Path to the PDF file.
-        page_num_one_indexed: The 1-based page number to analyze.
-        vertical_tolerance: Passed to extract_phrases_and_line_items.
-        horizontal_tolerance: Passed to extract_phrases_and_line_items.
-
-    Returns:
-        None. Prints the result from extract_phrases_and_line_items as JSON
-        and a summary of detected line item numbers.
-    """
+def analyze_pdf_structure(pdf_path, page_num_one_indexed):
+    """Analyzes a PDF page to extract line items, labels, and associated amounts."""
     if not os.path.exists(pdf_path):
         print(f"Error: PDF file not found at {pdf_path}", file=sys.stderr)
         sys.exit(1)
@@ -183,57 +173,63 @@ def analyze_pdf_phrases(pdf_path, page_num_one_indexed, vertical_tolerance=2, ho
                 sys.exit(1)
 
             page = pdf.pages[page_index]
-            print(f"Analyzing PDF: '{os.path.basename(pdf_path)}', Page: {page_num_one_indexed} for phrases...")
+            print(f"Analyzing PDF: '{os.path.basename(pdf_path)}', Page: {page_num_one_indexed}...")
 
-            # --- Call the reusable extraction function --- 
-            # Pass tolerances directly; other defaults are handled in the function
-            extraction_result = extract_phrases_and_line_items(
-                page,
-                vertical_tolerance=vertical_tolerance,
-                horizontal_tolerance=horizontal_tolerance
-            )
+            # Define constants (could be args later)
+            AMOUNT_COLOR = (0, 0, 0.5)
 
-            if not extraction_result["line_item_numbers"] and not extraction_result["text_phrases"]:
-                print(f"No phrases or line items extracted from page {page_num_one_indexed}.")
-                return
+            # --- Extract base elements --- 
+            phrase_result = extract_phrases_and_line_items(page)
+            line_items = phrase_result["line_item_numbers"]
+            header_phrases = phrase_result["header_phrases"]
+            body_phrases = phrase_result["body_phrases"]
 
-            # Call the reusable association function
-            associated_labels = associate_line_items_with_labels(extraction_result["line_item_numbers"], extraction_result["text_phrases"])
+            amounts = extract_amounts_by_color(page, amount_color_tuple=AMOUNT_COLOR)
 
-            # --- Process associated items and calculate combined position --- 
-            final_labeled_items = []
+            # --- Determine overall context --- 
+            amount_unit = determine_amount_unit(header_phrases)
+
+            # --- Associate labels to line items --- 
+            # Use body phrases for labels, as headers are usually titles/instructions
+            labeled_lines = associate_line_labels(line_items, body_phrases)
+
+            # --- Associate amounts to labeled lines --- 
+            amount_map = associate_amounts_to_lines(labeled_lines, amounts, page.height)
+
+            # --- Build final output --- 
+            output_line_items = []
             unmatched_count = 0
-            for association in associated_labels:
-                line_item = association["line_item"]
-                phrase = association["associated_phrase"]
-
-                if phrase:
-                    # Calculate combined bounding box
-                    item_pos = line_item['position']
-                    phrase_pos = phrase['position']
-
-                    min_x0 = item_pos[0]
-                    min_y0 = min(item_pos[1], phrase_pos[1])
-                    max_x1 = phrase_pos[2]
-                    max_y1 = max(item_pos[3], phrase_pos[3])
-                    combined_pos = (min_x0, min_y0, max_x1, max_y1)
-
-                    final_labeled_items.append({
-                        "line_item_number": line_item['line_item_number'],
-                        "label": phrase['phrase'],
-                        "combined_position": combined_pos
-                    })
-                else:
+            for line_data in labeled_lines:
+                if line_data["label"] is None:
                     unmatched_count += 1
-                    # Log if no suitable label found for a line item
-                    logging.warning(f"No associated phrase found for line item: {line_item['line_item_number']} at position {line_item['position']}")
+                    logging.warning(f"No label found for line item: {line_data['line_item_number']} at pos {line_data['line_item_position']}")
+                    # Skip items without labels in the final output
+                    continue
+
+                line_num = line_data['line_item_number']
+                output_line_items.append({
+                    "line_item_number": line_num,
+                    "label": line_data['label'],
+                    "amount": amount_map.get(line_num), # Get amount if associated, else None
+                })
 
             # Log items that were filtered out (optional)
             if unmatched_count > 0:
-                logging.warning(f"Could not associate a label for {unmatched_count} line items.")
+                logging.warning(f"Could not associate a label for {unmatched_count} line items (excluded from output).")
+           
+            # Log how many amounts weren't mapped
+            unmapped_amount_count = len(amounts) - len([ln for ln in output_line_items if ln['amount'] is not None])
+            if unmapped_amount_count > 0:
+                logging.info(f"{unmapped_amount_count} amounts could not be associated with a line item.")
 
-            # --- Print Associated Labels as JSON --- 
-            print(json.dumps(final_labeled_items, indent=4))
+            # --- Create final output structure --- 
+            final_output = {
+                "amount_unit": amount_unit.value, # Global unit for the page
+                "line_items": output_line_items
+            }
+
+            # --- Print Final JSON ---
+            print(json.dumps(final_output, indent=4))
 
     except Exception as e:
         print(f"An error occurred during PDF processing: {e}", file=sys.stderr)
@@ -245,7 +241,7 @@ def main():
     parser.add_argument('page_number', type=int, help='The 1-based page number to analyze.')
     args = parser.parse_args()
 
-    analyze_pdf_phrases(args.pdf_path, args.page_number)
+    analyze_pdf_structure(args.pdf_path, args.page_number)
 
 if __name__ == "__main__":
     main()

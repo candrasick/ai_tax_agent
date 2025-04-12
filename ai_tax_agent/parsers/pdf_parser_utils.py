@@ -4,6 +4,7 @@ import pdfplumber
 from typing import List, Tuple, Dict, Any, Optional
 import re
 from enum import Enum
+import math # Import math for distance calculation
 
 # Define Enum for amount units
 class AmountUnit(Enum):
@@ -154,9 +155,10 @@ def extract_phrases_and_line_items(
     vertical_tolerance: float = 2,
     horizontal_tolerance: float = 5,
     line_item_font_size_threshold: float = 7.0,
+    header_font_size_threshold: float = 7.0, # Reuse or define separately
     page_corner_threshold_pct: float = 0.15
 ) -> Dict[str, List[Dict[str, Any]]]:
-    """Extracts text phrases and line item numbers from a PDF page.
+    """Extracts line items, header phrases, and body phrases.
 
     Groups words based on proximity, then identifies and filters line item numbers
     based on pattern, font size, and position.
@@ -166,17 +168,19 @@ def extract_phrases_and_line_items(
         vertical_tolerance: Max vertical distance between word tops for same phrase.
         horizontal_tolerance: Max horizontal distance between words for same phrase.
         line_item_font_size_threshold: Font size below which a number is considered a line item.
+        header_font_size_threshold: Font size threshold for classifying as a header phrase.
         page_corner_threshold_pct: Percentage of page dimensions to define the upper-left corner.
 
     Returns:
-        A dictionary containing two lists:
+        A dictionary containing three lists:
             'line_item_numbers': Filtered and sorted line item numbers with positions.
-            'text_phrases': Remaining text phrases with positions.
+            'header_phrases': Filtered header phrases with positions.
+            'body_phrases': Remaining text phrases with positions.
     """
     # --- Extract words and sort them --- 
     words = page.extract_words(extra_attrs=['fontname', 'size']) # Need size for filtering
     if not words:
-        return {"line_item_numbers": [], "text_phrases": []}
+        return {"line_item_numbers": [], "header_phrases": [], "body_phrases": []}
     
     sorted_words = sorted(words, key=lambda w: (w['top'], w['x0']))
 
@@ -217,33 +221,46 @@ def extract_phrases_and_line_items(
             "position": (min_x0, min_y0, max_x1, max_y1)
         })
 
-    # --- Separate Line Item Numbers from Text Phrases --- 
+    # --- Separate Line Items, Headers, and Body Phrases ---
     line_item_numbers_unfiltered = []
-    text_phrases = []
+    header_phrases = []
+    body_phrases = []
     line_item_pattern = re.compile(r"^\s*(\d{1,2}[a-zA-Z]?)\s*$")
 
     for phrase_data in phrases_raw:
         word_list = phrase_data['words']
         is_line_item = False
+        first_word_size = word_list[0].get('size') if word_list else None
+
+        # Check for Line Item
         if len(word_list) == 1:
             single_word = word_list[0]
             word_text = single_word['text']
             word_size = single_word.get('size')
             match = line_item_pattern.fullmatch(word_text)
+            # Use <= for threshold comparison as per previous logic
             if match and (word_size is None or word_size < line_item_font_size_threshold):
                 is_line_item = True
                 line_item_numbers_unfiltered.append({
                     "line_item_number": match.group(1),
-                    "position": phrase_data['position']
+                    "position": phrase_data['position'],
+                    "size": word_size # Keep size info if needed
                 })
+
+        # If not a line item, classify as Header or Body
         if not is_line_item:
             phrase_text = " ".join(w['text'] for w in word_list)
-            text_phrases.append({
+            output_phrase = {
                 "phrase": phrase_text,
                 "position": phrase_data['position']
-            })
+            }
+            # Use >= for header threshold comparison
+            if first_word_size is not None and first_word_size >= header_font_size_threshold:
+                 header_phrases.append(output_phrase)
+            else:
+                 body_phrases.append(output_phrase)
 
-    # --- Filter out page numbers --- 
+    # --- Filter out page numbers from line items ---
     filtered_line_item_numbers = list(line_item_numbers_unfiltered)
     if line_item_numbers_unfiltered:
         most_upper_left_item = min(
@@ -272,12 +289,13 @@ def extract_phrases_and_line_items(
 
     return {
         "line_item_numbers": filtered_line_item_numbers,
-        "text_phrases": text_phrases
+        "header_phrases": header_phrases,
+        "body_phrases": body_phrases
     }
 
-def associate_line_items_with_labels(
+def associate_line_labels(
     line_items: List[Dict[str, Any]],
-    text_phrases: List[Dict[str, Any]],
+    text_phrases: List[Dict[str, Any]], # Typically body_phrases
     default_vertical_tolerance: float = 5.0
 ) -> List[Dict[str, Any]]:
     """Associates line item numbers with the closest, aligned text phrase to their right.
@@ -291,7 +309,7 @@ def associate_line_items_with_labels(
         A list of dictionaries, each containing 'line_item_number' and 'label'
         (which is the text of the associated phrase, or None if no match found).
     """
-    line_item_labels = []
+    labeled_lines = []
 
     for item in line_items:
         item_pos = item['position'] # (x0, top, x1, bottom)
@@ -301,7 +319,7 @@ def associate_line_items_with_labels(
         # Use half item height for tolerance, with a fallback default
         vertical_tolerance = item_height / 2 if item_height > 1 else default_vertical_tolerance
 
-        best_match_phrase = None
+        best_match_phrase_data = None
         min_horizontal_distance = float('inf')
 
         for phrase in text_phrases:
@@ -309,23 +327,97 @@ def associate_line_items_with_labels(
             phrase_left_x = phrase_pos[0]
             phrase_v_center = (phrase_pos[1] + phrase_pos[3]) / 2
 
-            # Check 1: Phrase must be to the right
-            if phrase_left_x >= item_right_x:
-                # Check 2: Phrase must be vertically aligned
-                if abs(phrase_v_center - item_v_center) < vertical_tolerance:
-                    # Check 3: Is it the closest horizontally?
-                    horizontal_distance = phrase_left_x - item_right_x
-                    if horizontal_distance < min_horizontal_distance:
-                        min_horizontal_distance = horizontal_distance
-                        best_match_phrase = phrase # Store the whole phrase dict
+            if phrase_left_x >= item_right_x and abs(phrase_v_center - item_v_center) < vertical_tolerance:
+                horizontal_distance = phrase_left_x - item_right_x
+                if horizontal_distance < min_horizontal_distance:
+                    min_horizontal_distance = horizontal_distance
+                    best_match_phrase_data = phrase
 
-        # Store the result, using None for label if no match was found
-        line_item_labels.append({
-            "line_item": item, # Keep original line item info (number + position)
-            "associated_phrase": best_match_phrase # Store the phrase dict or None
+        label_text = best_match_phrase_data['phrase'] if best_match_phrase_data else None
+        label_pos = best_match_phrase_data['position'] if best_match_phrase_data else None
+
+        combined_pos = None
+        if label_pos:
+             min_x0 = item_pos[0]
+             min_y0 = min(item_pos[1], label_pos[1])
+             max_x1 = label_pos[2]
+             max_y1 = max(item_pos[3], label_pos[3])
+             combined_pos = (min_x0, min_y0, max_x1, max_y1)
+
+        labeled_lines.append({
+            "line_item_number": item['line_item_number'],
+            "label": label_text,
+            "line_item_position": item_pos, # Keep original positions if needed
+            "label_position": label_pos,
+            "combined_position": combined_pos # Store combined position
         })
-        # Logging for unmatched items could be done here or after filtering in the caller
-        # if best_match_phrase is None:
-        #     print(f"Debug: No label for {item['line_item_number']}")
+    return labeled_lines
 
-    return line_item_labels 
+def associate_amounts_to_lines(
+    labeled_lines: List[Dict[str, Any]],
+    amounts: List[Dict[str, Any]],
+    page_height: float, # Needed for distance normalization/thresholding
+    max_distance_factor: float = 0.15 # Factor of page height for proximity
+) -> Dict[str, str]:
+    """Associates amounts with the closest 'up-and-left' labeled line item.
+
+    Args:
+        labeled_lines: List of dictionaries containing line item numbers and their labels.
+        amounts: List of dictionaries containing amounts and their positions.
+        page_height: Height of the PDF page for distance normalization.
+        max_distance_factor: Factor of page height for proximity threshold.
+
+    Returns:
+        A dictionary mapping line_item_number to amount_text.
+    """
+    amount_map = {} # Maps line_item_number -> amount_text
+    max_distance = page_height * max_distance_factor # Max distance threshold
+
+    # Filter labeled_lines to only those with a combined_position for association
+    valid_lines = [line for line in labeled_lines if line.get("combined_position")]
+
+    for amount_data in amounts:
+        amount_pos = amount_data['position'] # (x0, top, x1, bottom)
+        amount_top_left = (amount_pos[0], amount_pos[1])
+
+        best_match_line_num = None
+        min_distance = float('inf')
+
+        for line_data in valid_lines:
+            line_pos = line_data['combined_position'] # (x0, top, x1, bottom)
+            line_bottom_right = (line_pos[2], line_pos[3])
+
+            # Calculate vector from line end to amount start
+            dx = amount_top_left[0] - line_bottom_right[0]
+            dy = amount_top_left[1] - line_bottom_right[1]
+
+            # Check 1: Must be generally up and left (dx>=0, dy>=0)
+            # Check 2: Must be within a shallow angle (e.g., ~20 deg from horizontal)
+            # tan(angle) = dy / dx. We want angle <= 20 deg. dy <= dx * tan(20)
+            # Handle dx=0 case (straight up) - this angle is 90 deg, so exclude.
+            is_within_angle = False
+            if dx > 0 and dy >= 0:
+                # Allow angle up to ~20 degrees from horizontal
+                # math.tan(math.radians(20)) is approx 0.364
+                if dy <= dx * 0.364: 
+                    is_within_angle = True
+            elif dx == 0 and dy == 0: # Exactly overlapping points? Unlikely but possible
+                is_within_angle = True # Count as 0 angle
+
+            if is_within_angle:
+                # Check 2: Calculate distance and check proximity
+                distance = math.sqrt(
+                    (amount_top_left[0] - line_bottom_right[0])**2 +
+                    (amount_top_left[1] - line_bottom_right[1])**2
+                )
+
+                if distance < max_distance and distance < min_distance:
+                    min_distance = distance
+                    best_match_line_num = line_data['line_item_number']
+
+        if best_match_line_num:
+            # Avoid overwriting if multiple amounts map to the same line?
+            # Current logic: last amount found wins. Could collect lists instead.
+            amount_map[best_match_line_num] = amount_data['amount']
+
+    return amount_map 
