@@ -24,6 +24,10 @@ if project_root_path not in sys.path:
 from ai_tax_agent.parsers.pdf_parser_utils import (
     extract_amounts_by_color,
     extract_form_schedule_titles,
+    determine_amount_unit,
+    AmountUnit,
+    extract_phrases_and_line_items,
+    associate_line_items_with_labels,
 )
 
 def display_page(mcid_groups, page_number, items_per_page=5):
@@ -150,8 +154,19 @@ def display_page(mcid_groups, page_number, items_per_page=5):
              break
 
 
-def analyze_pdf_fonts(pdf_path, page_num_one_indexed):
-    """Analyzes a specific page of a PDF, separating amounts by color and grouping other text by font properties, including positions."""
+def analyze_pdf_phrases(pdf_path, page_num_one_indexed, vertical_tolerance=2, horizontal_tolerance=5):
+    """Analyzes a PDF page to extract phrases and line items, printing the result as JSON.
+
+    Args:
+        pdf_path: Path to the PDF file.
+        page_num_one_indexed: The 1-based page number to analyze.
+        vertical_tolerance: Passed to extract_phrases_and_line_items.
+        horizontal_tolerance: Passed to extract_phrases_and_line_items.
+
+    Returns:
+        None. Prints the result from extract_phrases_and_line_items as JSON
+        and a summary of detected line item numbers.
+    """
     if not os.path.exists(pdf_path):
         print(f"Error: PDF file not found at {pdf_path}", file=sys.stderr)
         sys.exit(1)
@@ -168,122 +183,57 @@ def analyze_pdf_fonts(pdf_path, page_num_one_indexed):
                 sys.exit(1)
 
             page = pdf.pages[page_index]
-            print(f"Analyzing PDF: '{os.path.basename(pdf_path)}', Page: {page_num_one_indexed}")
+            print(f"Analyzing PDF: '{os.path.basename(pdf_path)}', Page: {page_num_one_indexed} for phrases...")
 
-            # Group characters by font properties
-            AMOUNT_COLOR_TUPLE = (0, 0, 0.5) # Target color for amounts
-            MIN_HEADER_FONT_SIZE = 7.0 # Minimum size to be considered a header
+            # --- Call the reusable extraction function --- 
+            # Pass tolerances directly; other defaults are handled in the function
+            extraction_result = extract_phrases_and_line_items(
+                page,
+                vertical_tolerance=vertical_tolerance,
+                horizontal_tolerance=horizontal_tolerance
+            )
 
-            header_font_groups = defaultdict(list)
-            body_font_groups = defaultdict(list)
-
-            # --- Extract Amount Words using Word Extraction --- 
-            amount_list = extract_amounts_by_color(page, AMOUNT_COLOR_TUPLE)
-
-            # --- Group Remaining Text Characters --- 
-            for char in page.chars:
-                char_color = char.get('non_stroking_color')
-                is_amount_char = False
-                if isinstance(char_color, tuple) and len(char_color) >= 3:
-                    if (abs(char_color[0] - AMOUNT_COLOR_TUPLE[0]) < 0.01 and
-                        abs(char_color[1] - AMOUNT_COLOR_TUPLE[1]) < 0.01 and
-                        abs(char_color[2] - AMOUNT_COLOR_TUPLE[2]) < 0.01):
-                        is_amount_char = True
-
-                # Only process characters not identified as part of an amount
-                if not is_amount_char:
-                    font = char.get('fontname')
-                    size = char.get('size')
-                    color = char_color
-                    rounded_size = round(size, 1) if size is not None else None
-
-                    # Use rounded size in the key
-                    group_key = (font, rounded_size, color)
-
-                    # Separate into header/body based on font size
-                    if rounded_size is not None and rounded_size >= MIN_HEADER_FONT_SIZE:
-                        header_font_groups[group_key].append(char)
-                    else:
-                        body_font_groups[group_key].append(char)
-
-            if not header_font_groups and not body_font_groups and not amount_list:
-                print(f"No characters found on page {page_num_one_indexed}.")
+            if not extraction_result["line_item_numbers"] and not extraction_result["text_phrases"]:
+                print(f"No phrases or line items extracted from page {page_num_one_indexed}.")
                 return
 
-            # Prepare JSON output
-            header_elements_list = []
-            body_elements_list = []
+            # Call the reusable association function
+            associated_labels = associate_line_items_with_labels(extraction_result["line_item_numbers"], extraction_result["text_phrases"])
 
-            # Sort groups for consistent output (optional, sorting by font name then size)
-            sorted_header_keys = sorted(header_font_groups.keys(), key=lambda k: (k[0] or "", k[1] or 0))
+            # --- Process associated items and calculate combined position --- 
+            final_labeled_items = []
+            unmatched_count = 0
+            for association in associated_labels:
+                line_item = association["line_item"]
+                phrase = association["associated_phrase"]
 
-            for key in sorted_header_keys:
-                chars_in_group = header_font_groups[key]
-                font, rounded_size, color = key
-                text = "".join(c['text'] for c in chars_in_group)
+                if phrase:
+                    # Calculate combined bounding box
+                    item_pos = line_item['position']
+                    phrase_pos = phrase['position']
 
-                # Format color nicely for JSON
-                color_str = repr(color) # Simple string representation
+                    min_x0 = item_pos[0]
+                    min_y0 = min(item_pos[1], phrase_pos[1])
+                    max_x1 = phrase_pos[2]
+                    max_y1 = max(item_pos[3], phrase_pos[3])
+                    combined_pos = (min_x0, min_y0, max_x1, max_y1)
 
-                # Calculate bounding box for the group
-                if chars_in_group:
-                    min_x0 = min(c['x0'] for c in chars_in_group)
-                    min_y0 = min(c['top'] for c in chars_in_group)
-                    max_x1 = max(c['x1'] for c in chars_in_group)
-                    max_y1 = max(c['bottom'] for c in chars_in_group)
-                    group_bbox = (min_x0, min_y0, max_x1, max_y1)
+                    final_labeled_items.append({
+                        "line_item_number": line_item['line_item_number'],
+                        "label": phrase['phrase'],
+                        "combined_position": combined_pos
+                    })
                 else:
-                    group_bbox = None # Should not happen if key exists
+                    unmatched_count += 1
+                    # Log if no suitable label found for a line item
+                    logging.warning(f"No associated phrase found for line item: {line_item['line_item_number']} at position {line_item['position']}")
 
-                header_elements_list.append({
-                    "font": font,
-                    "font_size": rounded_size, # Use rounded size
-                    "font_color": color_str,
-                    "text": text.strip(),
-                    "position": group_bbox
-                })
+            # Log items that were filtered out (optional)
+            if unmatched_count > 0:
+                logging.warning(f"Could not associate a label for {unmatched_count} line items.")
 
-            # --- Process Body Groups --- 
-            sorted_body_keys = sorted(body_font_groups.keys(), key=lambda k: (k[0] or "", k[1] or 0))
-
-            for key in sorted_body_keys:
-                chars_in_group = body_font_groups[key]
-                font, rounded_size, color = key
-                text = "".join(c['text'] for c in chars_in_group)
-
-                # Format color nicely for JSON
-                color_str = repr(color) # Simple string representation
-
-                # Calculate bounding box for the group
-                if chars_in_group:
-                    min_x0 = min(c['x0'] for c in chars_in_group)
-                    min_y0 = min(c['top'] for c in chars_in_group)
-                    max_x1 = max(c['x1'] for c in chars_in_group)
-                    max_y1 = max(c['bottom'] for c in chars_in_group)
-                    group_bbox = (min_x0, min_y0, max_x1, max_y1)
-                else:
-                    group_bbox = None # Should not happen if key exists
-
-                body_elements_list.append({
-                    "font": font,
-                    "font_size": rounded_size, # Use rounded size
-                    "font_color": color_str,
-                    "text": text.strip(),
-                    "position": group_bbox
-                })
-
-            # --- Extract Form/Schedule Titles from Headers --- 
-            title_info = extract_form_schedule_titles(header_elements_list)
-
-            # Print the final JSON output
-            final_output = {
-                "form_title": title_info["form_title"],
-                "schedule_title": title_info["schedule_title"],
-                "amounts": amount_list,
-                "body_elements": body_elements_list # Keep body elements
-                # header_elements are not included in final output, only used for title extraction
-            }
-            print(json.dumps(final_output, indent=4))
+            # --- Print Associated Labels as JSON --- 
+            print(json.dumps(final_labeled_items, indent=4))
 
     except Exception as e:
         print(f"An error occurred during PDF processing: {e}", file=sys.stderr)
@@ -295,7 +245,7 @@ def main():
     parser.add_argument('page_number', type=int, help='The 1-based page number to analyze.')
     args = parser.parse_args()
 
-    analyze_pdf_fonts(args.pdf_path, args.page_number)
+    analyze_pdf_phrases(args.pdf_path, args.page_number)
 
 if __name__ == "__main__":
     main()
