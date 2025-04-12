@@ -8,6 +8,10 @@ import logging
 import re
 import json
 
+# Tolerance for floating point comparisons if needed
+# FONT_SIZE_TOLERANCE = 0.01 
+# COLOR_TOLERANCE = 0.01
+
 # Add project root to Python path if necessary (adjust as needed)
 # project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # sys.path.insert(0, project_root)
@@ -58,10 +62,8 @@ def display_page(mcid_groups, page_number, items_per_page=5):
             reconstructed_text = "".join(full_text_builder)
 
             # --- Preprocess text: Add spaces --- 
-            # Add space *before* '$'
-            modified_text = re.sub(r'\$', r' $', reconstructed_text)
-            # Add space before number pattern (like '1', '2a') if not preceded by whitespace
-            modified_text = re.sub(r'(?<=\S)(\d+[a-zA-Z]?)', r' \1', modified_text)
+            # Only preprocess needed: Add space before number pattern if not preceded by whitespace
+            modified_text = re.sub(r'(?<=\S)(\d+[a-zA-Z]?)', r' \1', reconstructed_text)
 
             # --- Step 1: Print Modified Reconstructed Text --- 
             print("  Step 1: Modified Reconstructed Text:")
@@ -80,67 +82,31 @@ def display_page(mcid_groups, page_number, items_per_page=5):
             # Final Pattern: Start, optional space, number/letter, space+, description, space+, literal $
             pattern = re.compile(r"^\s*(\d+[a-zA-Z]?)\s+(.*?)\s+\$")
             extracted_items = [] # Store dictionaries here
-            for line in modified_text.splitlines(): # Use modified text for regex matching
-                match = pattern.search(line.strip()) # Strip line whitespace before matching
-                if match:
-                    form_number = match.group(1).strip()
-                    title = match.group(2).strip()
-                    extracted_items.append({"form_number": form_number, "title": title})
 
-            # --- Logic-Based Parsing --- 
-            # Find all number patterns (like " 1 ", " 2a ")
+            # --- Logic-Based Parsing (Using Next Number as Delimiter) --- 
+            # Find all number patterns (like " 1 ", " 2a ") - ensures space before/after
             # Pattern looks for space, number/letter, space (captures number/letter)
             number_pattern = re.compile(r"\s(\d+[a-zA-Z]?)\s")
-            # Find all spaced dollar signs (" $")
-            dollar_pattern = re.compile(r"\s\$")
 
             number_matches = list(number_pattern.finditer(modified_text))
-            dollar_matches = list(dollar_pattern.finditer(modified_text))
 
-            dollar_positions = [match.start() for match in dollar_matches]
-            dollar_idx = 0
+            # Iterate through numbers, using the next number's start as the end delimiter
+            for i in range(len(number_matches) - 1): # Go up to second-to-last number
+                num_match = number_matches[i]
+                next_num_match = number_matches[i+1]
 
-            # Create a set of number start positions for quick lookup during validation
-            # We need the start position of the actual number, not the preceding space
-            number_start_positions = {match.start(1) for match in number_matches}
-
-            for i, num_match in enumerate(number_matches):
                 form_number = num_match.group(1) # The captured number/letter
                 num_end_pos = num_match.end() # Position after the number pattern match
 
-                # Find the next dollar sign position after the current number
-                next_dollar_pos = -1
-                temp_dollar_idx = dollar_idx # Use a temporary index for searching
-                while temp_dollar_idx < len(dollar_positions):
-                    current_dollar_pos = dollar_positions[temp_dollar_idx]
-                    if current_dollar_pos > num_end_pos:
-                        # Found the first dollar sign *after* the current number ends
-                        next_dollar_pos = current_dollar_pos
-                        # Optimization: update main dollar_idx so next number search starts here
-                        # This assumes numbers and dollars appear roughly in order
-                        dollar_idx = temp_dollar_idx
-                        break
-                    temp_dollar_idx += 1
+                # End position is the start of the *next* number pattern match
+                title_end_pos = next_num_match.start()
 
-                if next_dollar_pos != -1:
-                    # --- Validation Step --- 
-                    # Check if another number pattern starts within the potential title text
-                    potential_title_slice = modified_text[num_end_pos:next_dollar_pos]
-                    contains_another_number = False
-                    # Search for the start of another number pattern within the slice
-                    intervening_match = number_pattern.search(potential_title_slice)
-                    if intervening_match:
-                        contains_another_number = True
-                        # Optional: Log skipped matches for debugging
-                        # logger.debug(f"Skipping potential match for '{form_number}': Found intervening number pattern near '{intervening_match.group(1)}' in title slice: '{potential_title_slice[:50]}...' ")
+                # Extract text between current number end and next number start
+                title = modified_text[num_end_pos:title_end_pos].strip()
 
-                    # Only proceed if no other number pattern was found in the slice
-                    if not contains_another_number:
-                        # Extract text between number match end and dollar match start
-                        title = potential_title_slice.strip()
-                        # Basic filtering: avoid titles that are just numbers or very short
-                        if title and not title.isdigit() and len(title) > 1:
-                            extracted_items.append({"form_number": form_number, "title": title})
+                # Basic filtering: avoid titles that are just numbers or very short
+                if title and not title.isdigit() and len(title) > 1:
+                    extracted_items.append({"form_number": form_number, "title": title})
 
             # --- Step 2: Print Extracted Items as JSON --- 
             print("  Extracted Form Items (JSON):")
@@ -174,8 +140,8 @@ def display_page(mcid_groups, page_number, items_per_page=5):
              break
 
 
-def analyze_pdf_mcids(pdf_path, page_num_one_indexed):
-    """Analyzes a specific page of a PDF, grouping text by MCID."""
+def analyze_pdf_fonts(pdf_path, page_num_one_indexed):
+    """Analyzes a specific page of a PDF, separating amounts by color and grouping other text by font properties, including positions."""
     if not os.path.exists(pdf_path):
         print(f"Error: PDF file not found at {pdf_path}", file=sys.stderr)
         sys.exit(1)
@@ -194,25 +160,98 @@ def analyze_pdf_mcids(pdf_path, page_num_one_indexed):
             page = pdf.pages[page_index]
             print(f"Analyzing PDF: '{os.path.basename(pdf_path)}', Page: {page_num_one_indexed}")
 
-            mcid_groups = defaultdict(lambda: {"chars": []})
+            # Group characters by font properties
+            amount_color_tuple = (0, 0, 0.5) # Assuming alpha is not relevant or always 1
+            amount_list = []
+            text_font_groups = defaultdict(list)
 
-            # Extract characters and group by mcid
-            chars = page.chars
-            for char in chars:
-                mcid = char.get('mcid') # Use .get() for safety, default is None
-                if mcid is not None: # Only group characters that have an MCID
-                     mcid_groups[mcid]["chars"].append(char)
-                # else:
-                    # Handle characters without MCID if needed
-                    # print(f"Char '{char['text']}' has no MCID")
+            # --- Extract Amount Words using Word Extraction --- 
+            # Extract words with necessary attributes
+            words = page.extract_words(extra_attrs=['fontname', 'size', 'non_stroking_color'])
+            amount_char_indices = set() # Keep track of chars belonging to amounts
+
+            for word in words:
+                # Check color - handle potential minor float variations if necessary
+                word_color = word.get('non_stroking_color')
+                # Simple comparison, adjust if color varies slightly (e.g., check proximity)
+                is_amount_word = False
+                if isinstance(word_color, tuple) and len(word_color) >= 3: # Check if tuple and has RGB
+                    if (abs(word_color[0] - amount_color_tuple[0]) < 0.01 and
+                        abs(word_color[1] - amount_color_tuple[1]) < 0.01 and
+                        abs(word_color[2] - amount_color_tuple[2]) < 0.01):
+                        is_amount_word = True
+
+                if is_amount_word:
+                    amount_list.append({
+                        "amount": word['text'],
+                        "position": (word['x0'], word['top'], word['x1'], word['bottom'])
+                    })
+                    # Mark characters within this word as processed (if possible/needed - pdfplumber words don't directly link back to chars)
+                    # We will filter chars later based on color instead.
 
 
-            if not mcid_groups:
-                 print(f"No characters with MCIDs found on page {page_num_one_indexed}.")
-                 return
+            # --- Group Remaining Text Characters --- 
+            for char in page.chars:
+                char_color = char.get('non_stroking_color')
+                is_amount_char = False
+                if isinstance(char_color, tuple) and len(char_color) >= 3:
+                    if (abs(char_color[0] - amount_color_tuple[0]) < 0.01 and
+                        abs(char_color[1] - amount_color_tuple[1]) < 0.01 and
+                        abs(char_color[2] - amount_color_tuple[2]) < 0.01):
+                        is_amount_char = True
 
-            # Display results with pagination
-            display_page(mcid_groups, page_index) # Pass 0-based index
+                # Only process characters not identified as part of an amount
+                if not is_amount_char:
+                    font = char.get('fontname')
+                    size = char.get('size')
+                    color = char_color
+                    rounded_size = round(size, 1) if size is not None else None
+
+                    # Use rounded size in the key
+                    font_key = (font, rounded_size, color)
+                    text_font_groups[font_key].append(char)
+
+            if not text_font_groups and not amount_list:
+                print(f"No characters found on page {page_num_one_indexed}.")
+                return
+
+            # Prepare JSON output
+            text_elements_list = []
+            # Sort groups for consistent output (optional, sorting by font name then size)
+            sorted_keys = sorted(text_font_groups.keys(), key=lambda k: (k[0] or "", k[1] or 0))
+
+            for key in sorted_keys:
+                chars_in_group = text_font_groups[key]
+                font, rounded_size, color = key
+                text = "".join(c['text'] for c in chars_in_group)
+
+                # Format color nicely for JSON
+                color_str = repr(color) # Simple string representation
+
+                # Calculate bounding box for the group
+                if chars_in_group:
+                    min_x0 = min(c['x0'] for c in chars_in_group)
+                    min_y0 = min(c['top'] for c in chars_in_group)
+                    max_x1 = max(c['x1'] for c in chars_in_group)
+                    max_y1 = max(c['bottom'] for c in chars_in_group)
+                    group_bbox = (min_x0, min_y0, max_x1, max_y1)
+                else:
+                    group_bbox = None # Should not happen if key exists
+
+                text_elements_list.append({
+                    "font": font,
+                    "font_size": rounded_size, # Use rounded size
+                    "font_color": color_str,
+                    "text": text.strip(),
+                    "position": group_bbox
+                })
+
+            # Print the final JSON output
+            final_output = {
+                "amounts": amount_list,
+                "text_elements": text_elements_list
+            }
+            print(json.dumps(final_output, indent=4))
 
     except Exception as e:
         print(f"An error occurred during PDF processing: {e}", file=sys.stderr)
@@ -224,7 +263,7 @@ def main():
     parser.add_argument('page_number', type=int, help='The 1-based page number to analyze.')
     args = parser.parse_args()
 
-    analyze_pdf_mcids(args.pdf_path, args.page_number)
+    analyze_pdf_fonts(args.pdf_path, args.page_number)
 
 if __name__ == "__main__":
     main()
