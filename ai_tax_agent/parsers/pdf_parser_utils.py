@@ -5,6 +5,8 @@ from typing import List, Tuple, Dict, Any, Optional
 import re
 from enum import Enum
 import math # Import math for distance calculation
+import os
+import logging
 
 # Define Enum for amount units
 class AmountUnit(Enum):
@@ -95,7 +97,7 @@ def extract_form_schedule_titles(
     schedule_pattern = re.compile(r"\bSchedule\s+([\w-]+)\b", re.IGNORECASE)
 
     for element in header_elements:
-        text = element.get('text', '')
+        text = element.get('phrase', '')
         if not text:
             continue
 
@@ -371,53 +373,163 @@ def associate_amounts_to_lines(
         A dictionary mapping line_item_number to amount_text.
     """
     amount_map = {} # Maps line_item_number -> amount_text
-    max_distance = page_height * max_distance_factor # Max distance threshold
 
     # Filter labeled_lines to only those with a combined_position for association
     valid_lines = [line for line in labeled_lines if line.get("combined_position")]
+    # Create a list of amounts not yet assigned
+    available_amounts = list(amounts)
 
-    for amount_data in amounts:
-        amount_pos = amount_data['position'] # (x0, top, x1, bottom)
-        amount_top_left = (amount_pos[0], amount_pos[1])
+    # Iterate through lines, finding the best amount for each
+    for line_data in valid_lines:
+        line_pos = line_data['combined_position'] # (x0, top, x1, bottom)
+        line_v_center = (line_pos[1] + line_pos[3]) / 2
 
-        best_match_line_num = None
-        min_distance = float('inf')
+        # --- DEBUG: Use large tolerance initially --- 
+        vertical_tolerance = 100.0 # Large fixed tolerance for debugging
+        # line_height = line_pos[3] - line_pos[1]
+        # vertical_tolerance = max(line_height / 2, 3.0)
+        print(f"\nProcessing Line: {line_data['line_item_number']} '{line_data['label'][:30]}...' (v_center: {line_v_center:.2f}, tol: {vertical_tolerance:.2f})")
 
-        for line_data in valid_lines:
-            line_pos = line_data['combined_position'] # (x0, top, x1, bottom)
-            line_bottom_right = (line_pos[2], line_pos[3])
+        best_match_amount_data = None
+        min_v_distance = float('inf')
 
-            # Calculate vector from line end to amount start
-            dx = amount_top_left[0] - line_bottom_right[0]
-            dy = amount_top_left[1] - line_bottom_right[1]
+        # Search through amounts that haven't been assigned yet
+        for i, amount_data in enumerate(available_amounts):
+            amount_pos = amount_data['position'] # (x0, top, x1, bottom)
+            amount_v_center = (amount_pos[1] + amount_pos[3]) / 2
 
-            # Check 1: Must be generally up and left (dx>=0, dy>=0)
-            # Check 2: Must be within a shallow angle (e.g., ~20 deg from horizontal)
-            # tan(angle) = dy / dx. We want angle <= 20 deg. dy <= dx * tan(20)
-            # Handle dx=0 case (straight up) - this angle is 90 deg, so exclude.
-            is_within_angle = False
-            if dx > 0 and dy >= 0:
-                # Allow angle up to ~20 degrees from horizontal
-                # math.tan(math.radians(20)) is approx 0.364
-                if dy <= dx * 0.364: 
-                    is_within_angle = True
-            elif dx == 0 and dy == 0: # Exactly overlapping points? Unlikely but possible
-                is_within_angle = True # Count as 0 angle
+            # Check 1: Amount must be to the right of the combined label/number block
+            if amount_pos[0] > line_pos[2]:
+                # Check 2: Calculate vertical distance
+                print(f"  Considering Amount: '{amount_data['amount']}' (v_center: {amount_v_center:.2f}, v_dist: {v_distance:.2f})")
+                v_distance = abs(amount_v_center - line_v_center)
 
-            if is_within_angle:
-                # Check 2: Calculate distance and check proximity
-                distance = math.sqrt(
-                    (amount_top_left[0] - line_bottom_right[0])**2 +
-                    (amount_top_left[1] - line_bottom_right[1])**2
-                )
+                # Check 3: Is it within vertical tolerance and the closest found so far?
+                if v_distance < vertical_tolerance and v_distance < min_v_distance:
+                    min_v_distance = v_distance
+                    best_match_amount_data = amount_data
+                    # Store index to remove later if assigning one amount per line
+                    # best_match_amount_index = i 
+        print(f"  -> Best Match: '{best_match_amount_data['amount'] if best_match_amount_data else 'None'}' (min_v_dist: {min_v_distance if min_v_distance != float('inf') else 'N/A'})" )
 
-                if distance < max_distance and distance < min_distance:
-                    min_distance = distance
-                    best_match_line_num = line_data['line_item_number']
-
-        if best_match_line_num:
+        # Assign the best match found for this line
+        if best_match_amount_data:
             # Avoid overwriting if multiple amounts map to the same line?
             # Current logic: last amount found wins. Could collect lists instead.
-            amount_map[best_match_line_num] = amount_data['amount']
+            # Assign amount to the current line item number
+            amount_map[line_data['line_item_number']] = best_match_amount_data['amount']
+            # Optimization: Remove the assigned amount so it can't be assigned again
+            # This assumes one amount per line. Adjust if amounts can align with multiple lines.
+            # DEBUG: Temporarily disable removing amounts to see all potential matches
+            # try: 
+            #     available_amounts.remove(best_match_amount_data)
+            # except ValueError: 
+            #      pass 
 
-    return amount_map 
+    return amount_map
+
+# --- Main Orchestration Function --- 
+
+def parse_pdf_page_structure(
+    pdf_path: str,
+    page_num_one_indexed: int,
+    amount_color_tuple: Tuple[float, float, float] = (0, 0, 0.5),
+    # Pass other parameters with defaults if needed
+    vertical_tolerance: float = 2,
+    horizontal_tolerance: float = 5,
+    line_item_font_size_threshold: float = 7.0,
+    header_font_size_threshold: float = 7.0, 
+    page_corner_threshold_pct: float = 0.15,
+    amount_proximity_factor: float = 0.15
+
+) -> Optional[Dict[str, Any]]:
+    """Parses a single PDF page to extract structured line items, labels, and amounts.
+
+    Orchestrates calls to various extraction and association functions.
+
+    Args:
+        pdf_path: Path to the PDF file.
+        page_num_one_indexed: The 1-based page number to analyze.
+        amount_color_tuple: RGB color tuple for identifying amounts.
+        vertical_tolerance: Tolerance for phrase grouping.
+        horizontal_tolerance: Tolerance for phrase grouping.
+        line_item_font_size_threshold: Font size limit for line items.
+        header_font_size_threshold: Font size threshold for headers.
+        page_corner_threshold_pct: Threshold for filtering page numbers.
+        amount_proximity_factor: Proximity factor for associating amounts.
+
+    Returns:
+        A dictionary containing the parsed structure ('form_title', 'schedule_title',
+        'amount_unit', 'line_items') or None if the page cannot be processed.
+    """
+    if not os.path.exists(pdf_path):
+        logging.error(f"PDF file not found at {pdf_path}")
+        return None
+
+    page_index = page_num_one_indexed - 1
+
+    try:
+        logging.getLogger("pdfminer").setLevel(logging.ERROR)
+        with pdfplumber.open(pdf_path) as pdf:
+            if page_index < 0 or page_index >= len(pdf.pages):
+                logging.error(f"Page number {page_num_one_indexed} is out of range (1-{len(pdf.pages)}).")
+                return None
+
+            page = pdf.pages[page_index]
+
+            # --- Extract base elements --- 
+            phrase_result = extract_phrases_and_line_items(
+                page, vertical_tolerance, horizontal_tolerance,
+                line_item_font_size_threshold, header_font_size_threshold,
+                page_corner_threshold_pct
+            )
+            line_items = phrase_result["line_item_numbers"]
+            header_phrases = phrase_result["header_phrases"]
+            body_phrases = phrase_result["body_phrases"]
+
+            amounts = extract_amounts_by_color(page, amount_color_tuple=amount_color_tuple)
+
+            # --- Determine overall context --- 
+            all_phrases_for_unit = header_phrases + body_phrases
+            amount_unit = determine_amount_unit(all_phrases_for_unit)
+            title_info = extract_form_schedule_titles(header_phrases)
+
+            # --- Associate labels to line items --- 
+            labeled_lines = associate_line_labels(line_items, body_phrases)
+
+            # --- Associate amounts to labeled lines --- 
+            amount_map = associate_amounts_to_lines(labeled_lines, amounts, page.height, max_distance_factor=amount_proximity_factor)
+
+            # --- Build final output --- 
+            output_line_items = []
+            unmatched_label_count = 0
+            for line_data in labeled_lines:
+                if line_data["label"] is None:
+                    unmatched_label_count += 1
+                    # Optional: Could log here if needed within the utility
+                    continue
+
+                line_num = line_data['line_item_number']
+                output_line_items.append({
+                    "line_item_number": line_num,
+                    "label": line_data['label'],
+                    "amount": amount_map.get(line_num), 
+                })
+
+            # Logging within the utility might be less desirable than in the calling script
+            # Consider returning counts or letting the caller handle logging.
+            # if unmatched_label_count > 0: ...
+            # unmapped_amount_count = len(amounts) - len(...)            
+            # if unmapped_amount_count > 0: ...
+
+            final_output = {
+                "form_title": title_info["form_title"],
+                "schedule_title": title_info["schedule_title"],
+                "amount_unit": amount_unit.value,
+                "line_items": output_line_items
+            }
+            return final_output
+
+    except Exception as e:
+        logging.error(f"An error occurred during PDF processing for page {page_num_one_indexed}: {e}", exc_info=True)
+        return None 

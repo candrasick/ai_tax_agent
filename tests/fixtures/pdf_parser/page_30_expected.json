@@ -1,0 +1,152 @@
+{
+    "form_title": "Form 1065",
+    "schedule_title": "Schedule K-1",
+    "amount_unit": "forms",
+    "line_items": [
+        {
+            "line_item_number": "1",
+            "label": "Ordinary business income (loss)",
+            "amount": "11,523,305"
+        },
+        {
+            "line_item_number": "2",
+            "label": "Net rental real estate income (loss)",
+            "amount": "7,299,759"
+        },
+        {
+            "line_item_number": "3",
+            "label": "Other net rental income (loss)",
+            "amount": "372,871"
+        },
+        {
+            "line_item_number": "4a",
+            "label": "Guaranteed payments for services",
+            "amount": null
+        },
+        {
+            "line_item_number": "4b",
+            "label": "Guaranteed payments for capital",
+            "amount": null
+        },
+        {
+            "line_item_number": "4c",
+            "label": "Total guaranteed payments",
+            "amount": "837,227"
+        },
+        {
+            "line_item_number": "5",
+            "label": "Interest income",
+            "amount": "6,099,862"
+        },
+        {
+            "line_item_number": "6a",
+            "label": "Ordinary dividends",
+            "amount": "3,380,687"
+        },
+        {
+            "line_item_number": "6b",
+            "label": "Qualified dividends",
+            "amount": null
+        },
+        {
+            "line_item_number": "6c",
+            "label": "Dividend equivalents",
+            "amount": "84,578"
+        },
+        {
+            "line_item_number": "7",
+            "label": "Royalties",
+            "amount": "631,886"
+        },
+        {
+            "line_item_number": "8",
+            "label": "Net short-term capital gain (loss)",
+            "amount": "2,282,209"
+        },
+        {
+            "line_item_number": "9a",
+            "label": "Net long-term capital gain (loss)",
+            "amount": "3,038,253"
+        },
+        {
+            "line_item_number": "9b",
+            "label": "Collectibles (28%) gain (loss)",
+            "amount": null
+        },
+        {
+            "line_item_number": "9c",
+            "label": "Unrecaptured section 1250 gain",
+            "amount": null
+        },
+        {
+            "line_item_number": "10",
+            "label": "Net section 1231 gain (loss)",
+            "amount": null
+        },
+        {
+            "line_item_number": "11",
+            "label": "Other income (loss)",
+            "amount": "2,131"
+        },
+        {
+            "line_item_number": "12",
+            "label": "Section 179 deduction",
+            "amount": "394,269"
+        },
+        {
+            "line_item_number": "13",
+            "label": "Other deductions",
+            "amount": "5,432"
+        },
+        {
+            "line_item_number": "14",
+            "label": "Self-employment earnings (loss)",
+            "amount": null
+        },
+        {
+            "line_item_number": "15",
+            "label": "Credits",
+            "amount": null
+        },
+        {
+            "line_item_number": "16",
+            "label": "Schedule K-3 is attached if",
+            "amount": null
+        },
+        {
+            "line_item_number": "17",
+            "label": "Alternative minimum tax (AMT) items",
+            "amount": null
+        },
+        {
+            "line_item_number": "18",
+            "label": "Tax-exempt income and",
+            "amount": null
+        },
+        {
+            "line_item_number": "19",
+            "label": "Distributions",
+            "amount": null
+        },
+        {
+            "line_item_number": "20",
+            "label": "Other information",
+            "amount": null
+        },
+        {
+            "line_item_number": "21",
+            "label": "Foreign taxes paid or accrued",
+            "amount": null
+        },
+        {
+            "line_item_number": "22",
+            "label": "More than one activity for at-risk purposes*",
+            "amount": null
+        },
+        {
+            "line_item_number": "23",
+            "label": "More than one activity for passive activity purposes*",
+            "amount": null
+        }
+    ]
+}

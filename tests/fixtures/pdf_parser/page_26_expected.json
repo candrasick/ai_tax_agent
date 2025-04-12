@@ -1,0 +1,97 @@
+{
+    "form_title": "Form W-2G",
+    "schedule_title": null,
+    "amount_unit": "dollars",
+    "line_items": [
+        {
+            "line_item_number": "1",
+            "label": "Reportable winnings",
+            "amount": "84,115,975"
+        },
+        {
+            "line_item_number": "2",
+            "label": "Date won",
+            "amount": null
+        },
+        {
+            "line_item_number": "3",
+            "label": "Type of wager",
+            "amount": null
+        },
+        {
+            "line_item_number": "4",
+            "label": "Federal income tax withheld",
+            "amount": "3,243,535"
+        },
+        {
+            "line_item_number": "5",
+            "label": "Transaction",
+            "amount": null
+        },
+        {
+            "line_item_number": "6",
+            "label": "Race",
+            "amount": null
+        },
+        {
+            "line_item_number": "7",
+            "label": "Winnings from identical wagers",
+            "amount": "344,891"
+        },
+        {
+            "line_item_number": "8",
+            "label": "Cashier",
+            "amount": null
+        },
+        {
+            "line_item_number": "9",
+            "label": "Winner\u2019s taxpayer identification no.",
+            "amount": null
+        },
+        {
+            "line_item_number": "10",
+            "label": "Window",
+            "amount": null
+        },
+        {
+            "line_item_number": "11",
+            "label": "First identification",
+            "amount": null
+        },
+        {
+            "line_item_number": "12",
+            "label": "Second identification",
+            "amount": null
+        },
+        {
+            "line_item_number": "13",
+            "label": "State/Payer\u2019s state identification no.",
+            "amount": null
+        },
+        {
+            "line_item_number": "14",
+            "label": "State winnings",
+            "amount": null
+        },
+        {
+            "line_item_number": "15",
+            "label": "State income tax withheld",
+            "amount": null
+        },
+        {
+            "line_item_number": "16",
+            "label": "Local winnings",
+            "amount": null
+        },
+        {
+            "line_item_number": "17",
+            "label": "Local income tax withheld",
+            "amount": null
+        },
+        {
+            "line_item_number": "18",
+            "label": "Name of locality",
+            "amount": null
+        }
+    ]
+}

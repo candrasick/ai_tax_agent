@@ -22,13 +22,7 @@ if project_root_path not in sys.path:
     sys.path.insert(0, project_root_path)
 
 from ai_tax_agent.parsers.pdf_parser_utils import (
-    extract_amounts_by_color,
-    extract_form_schedule_titles,
-    determine_amount_unit,
-    AmountUnit,
-    extract_phrases_and_line_items,
-    associate_line_labels,
-    associate_amounts_to_lines,
+    parse_pdf_page_structure # Only import the main function
 )
 
 def display_page(mcid_groups, page_number, items_per_page=5):
@@ -156,92 +150,27 @@ def display_page(mcid_groups, page_number, items_per_page=5):
 
 
 def analyze_pdf_structure(pdf_path, page_num_one_indexed):
-    """Analyzes a PDF page to extract line items, labels, and associated amounts."""
-    if not os.path.exists(pdf_path):
-        print(f"Error: PDF file not found at {pdf_path}", file=sys.stderr)
-        sys.exit(1)
+    """Analyzes a PDF page to extract structure and prints the result as JSON."""
+    print(f"Analyzing PDF: '{os.path.basename(pdf_path)}', Page: {page_num_one_indexed}...")
+    result = parse_pdf_page_structure(pdf_path, page_num_one_indexed)
 
-    page_index = page_num_one_indexed - 1 # pdfplumber uses 0-based index
-
-    try:
-        # Suppress pdfminer warnings (like CropBox missing)
-        logging.getLogger("pdfminer").setLevel(logging.ERROR)
-
-        with pdfplumber.open(pdf_path) as pdf:
-            if page_index < 0 or page_index >= len(pdf.pages):
-                print(f"Error: Page number {page_num_one_indexed} is out of range (1-{len(pdf.pages)}).", file=sys.stderr)
-                sys.exit(1)
-
-            page = pdf.pages[page_index]
-            print(f"Analyzing PDF: '{os.path.basename(pdf_path)}', Page: {page_num_one_indexed}...")
-
-            # Define constants (could be args later)
-            AMOUNT_COLOR = (0, 0, 0.5)
-
-            # --- Extract base elements --- 
-            phrase_result = extract_phrases_and_line_items(page)
-            line_items = phrase_result["line_item_numbers"]
-            header_phrases = phrase_result["header_phrases"]
-            body_phrases = phrase_result["body_phrases"]
-
-            amounts = extract_amounts_by_color(page, amount_color_tuple=AMOUNT_COLOR)
-
-            # --- Determine overall context --- 
-            # Combine header and body phrases for unit determination
-            all_phrases_for_unit = header_phrases + body_phrases
-            amount_unit = determine_amount_unit(all_phrases_for_unit)
-
-            # --- Associate labels to line items --- 
-            # Use body phrases for labels, as headers are usually titles/instructions
-            labeled_lines = associate_line_labels(line_items, body_phrases)
-
-            # --- Associate amounts to labeled lines --- 
-            amount_map = associate_amounts_to_lines(labeled_lines, amounts, page.height)
-
-            # --- Build final output --- 
-            output_line_items = []
-            unmatched_count = 0
-            for line_data in labeled_lines:
-                if line_data["label"] is None:
-                    unmatched_count += 1
-                    logging.warning(f"No label found for line item: {line_data['line_item_number']} at pos {line_data['line_item_position']}")
-                    # Skip items without labels in the final output
-                    continue
-
-                line_num = line_data['line_item_number']
-                output_line_items.append({
-                    "line_item_number": line_num,
-                    "label": line_data['label'],
-                    "amount": amount_map.get(line_num), # Get amount if associated, else None
-                })
-
-            # Log items that were filtered out (optional)
-            if unmatched_count > 0:
-                logging.warning(f"Could not associate a label for {unmatched_count} line items (excluded from output).")
-           
-            # Log how many amounts weren't mapped
-            unmapped_amount_count = len(amounts) - len([ln for ln in output_line_items if ln['amount'] is not None])
-            if unmapped_amount_count > 0:
-                logging.info(f"{unmapped_amount_count} amounts could not be associated with a line item.")
-
-            # --- Create final output structure --- 
-            final_output = {
-                "amount_unit": amount_unit.value, # Global unit for the page
-                "line_items": output_line_items
-            }
-
-            # --- Print Final JSON ---
-            print(json.dumps(final_output, indent=4))
-
-    except Exception as e:
-        print(f"An error occurred during PDF processing: {e}", file=sys.stderr)
-        sys.exit(1)
+    if result:
+        print(json.dumps(result, indent=4))
+    else:
+        print(f"Failed to process page {page_num_one_indexed} from {pdf_path}. Check logs.", file=sys.stderr)
+        # Optionally exit with error code
+        # sys.exit(1)
 
 def main():
-    parser = argparse.ArgumentParser(description='Analyze MCID groupings on a specific PDF page.')
-    parser.add_argument('pdf_path', help='Path to the PDF file (e.g., data/tax_statistics/individuals.pdf)')
+    parser = argparse.ArgumentParser(description='Extract structured line items, labels, and amounts from PDF page.')
+    parser.add_argument('pdf_path', help='Path to the PDF file.')
     parser.add_argument('page_number', type=int, help='The 1-based page number to analyze.')
+    # Add optional logging level argument if needed
+    # parser.add_argument("--log-level", default="WARNING", choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"], help="Set the logging level.")
     args = parser.parse_args()
+
+    # Configure basic logging (adjust level as needed)
+    logging.basicConfig(level=logging.WARNING, format='%(levelname)s:%(name)s:%(message)s')
 
     analyze_pdf_structure(args.pdf_path, args.page_number)
 
