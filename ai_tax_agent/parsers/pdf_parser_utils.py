@@ -86,49 +86,148 @@ def extract_amounts_by_color(
     return amount_list
 
 def extract_form_schedule_titles(
-    header_elements: List[Dict[str, Any]]
+    header_elements: List[Dict[str, Any]],
+    body_phrases: List[Dict[str, Any]] # Add body phrases as input
 ) -> Dict[str, Optional[str]]:
-    """Extracts the main Form and Schedule titles from a list of header text elements.
+    """Identifies Form and Schedule titles from header and optionally body elements.
+
+    Searches headers first, then body text if titles are not found in headers.
+    Assumes titles are usually larger font text near the top in headers.
 
     Args:
-        header_elements: A list of dictionaries, where each dictionary represents a
-                         text element identified as a header and contains a 'text' key.
+        header_elements: List of text elements identified as headers.
+        body_phrases: List of text elements identified as body text.
 
     Returns:
-        A dictionary with keys 'form_title' and 'schedule_title', containing the
-        extracted titles (e.g., "Form 1099", "Schedule K-1") or None if not found.
+        A dictionary with 'form_title' and 'schedule_title'.
     """
     form_title = None
     schedule_title = None
 
-    # Regex to find "Form" followed by whitespace and an alphanumeric/hyphenated identifier
-    form_pattern = re.compile(r"\bForm\s+([\w-]+)\b", re.IGNORECASE)
-    # Regex to find "Schedule" followed by whitespace and an alphanumeric/hyphenated identifier
-    schedule_pattern = re.compile(r"\bSchedule\s+([\w-]+)\b", re.IGNORECASE)
+    # --- Search Headers First ---
+    # Sort by vertical position (top first), then maybe font size (largest first)
+    header_elements.sort(key=lambda x: (x.get('position', [0,0,0,0])[1], -x.get('size', 0)))
+
+    form_keywords = ["Form", "form"]
+    schedule_keywords = ["Schedule", "SCHEDULE"] # Keep case variations
+
+    found_form_in_header = False
+    found_schedule_in_header = False
 
     for element in header_elements:
-        text = element.get('phrase', '')
-        if not text:
+        # Ensure element is a dict and has 'text' key
+        if not isinstance(element, dict) or 'text' not in element:
+            logging.warning(f"Skipping invalid header element: {element}")
             continue
+        text = element['text']
 
-        # Search for Form title if not already found
-        if form_title is None:
-            form_match = form_pattern.search(text)
-            if form_match:
-                # Construct the full title
-                form_title = f"Form {form_match.group(1)}"
+        # Prioritize finding Form first
+        if not found_form_in_header:
+            for keyword in form_keywords:
+                # Use regex for word boundary to avoid matching substrings like "Information"
+                if re.search(rf"\\b{keyword}\\b", text):
+                    form_title = text.strip()
+                    found_form_in_header = True
+                    break # Found form keyword in this element
 
-        # Search for Schedule title if not already found
-        if schedule_title is None:
-            schedule_match = schedule_pattern.search(text)
-            if schedule_match:
-                # Construct the full title
-                schedule_title = f"Schedule {schedule_match.group(1)}"
+        # Look for Schedule in the same element or others
+        # Don't reset found_schedule_in_header if already found
+        if not found_schedule_in_header:
+             for keyword in schedule_keywords:
+                 if re.search(rf"\\b{keyword}\\b", text):
+                     # Avoid assigning the same text to both if keywords overlap/present in same string initially
+                     if text.strip() != form_title:
+                         schedule_title = text.strip()
+                         found_schedule_in_header = True
+                         break # Found schedule keyword in this element
+                     # Handle case where both keywords are in the same header element (e.g. "Form 1040 Schedule A")
+                     elif found_form_in_header and form_title == text.strip():
+                          # Attempt to split
+                          parts = re.split(rf"(\\b{keyword}\\b.*)", text, 1, re.IGNORECASE)
+                          if len(parts) >= 3: # Should get ["Form xxx ", "Schedule yyy", ""] potentially
+                              form_title = parts[0].strip()
+                              # Reconstruct schedule part carefully
+                              schedule_title = "".join(parts[1:]).strip()
+                              found_schedule_in_header = True
+                              break # Found and split schedule
 
-        # Optimization: Stop searching if both are found
-        if form_title is not None and schedule_title is not None:
+        # If we found distinct titles for both, we can stop searching headers
+        if found_form_in_header and found_schedule_in_header and form_title != schedule_title:
             break
 
+    # Fallback: if no keywords found in headers, assign the topmost largest element as form title
+    if not found_form_in_header and header_elements:
+        # Ensure the first element is valid before accessing 'text'
+        first_header = header_elements[0]
+        if isinstance(first_header, dict) and 'text' in first_header:
+             form_title = first_header['text'].strip()
+             # Check if this fallback assignment contains "Schedule"
+             if not found_schedule_in_header:
+                  for keyword in schedule_keywords:
+                      if re.search(rf"\\b{keyword}\\b", form_title):
+                           # Attempt split again if fallback contained schedule
+                           parts = re.split(rf"(\\b{keyword}\\b.*)", form_title, 1, re.IGNORECASE)
+                           if len(parts) >= 3:
+                               form_title = parts[0].strip()
+                               schedule_title = "".join(parts[1:]).strip()
+                               found_schedule_in_header = True
+                               break
+        else:
+            logging.warning("Could not apply header fallback title: Invalid first header element.")
+
+
+    # --- Search Body if Titles Still Missing ---
+    # Search body only if we didn't find a specific title using keywords in headers
+    # or the fallback didn't provide one.
+    search_body_for_form = not form_title
+    search_body_for_schedule = not schedule_title
+
+    if search_body_for_form or search_body_for_schedule:
+        logging.debug("Searching body phrases for missing titles...")
+        # Sort body phrases? Maybe just scan is fine. Sort by position might help.
+        body_phrases.sort(key=lambda x: (x.get('position', [0,0,0,0])[1], x.get('position', [0,0,0,0])[0]))
+        for phrase in body_phrases:
+             # Ensure phrase is a dict and has 'text' key
+             if not isinstance(phrase, dict) or 'text' not in phrase:
+                 logging.warning(f"Skipping invalid body phrase: {phrase}")
+                 continue
+             text = phrase['text']
+
+             if search_body_for_form:
+                 for keyword in form_keywords:
+                      if re.search(rf"\\b{keyword}\\b", text):
+                           # Simple assignment from body - might be less reliable
+                           form_title = text.strip()
+                           search_body_for_form = False # Found it
+                           logging.debug(f"Found potential form title in body: {form_title}")
+                           break
+
+             if search_body_for_schedule:
+                  for keyword in schedule_keywords:
+                      if re.search(rf"\\b{keyword}\\b", text):
+                           # Check if it's the same as the potential form title found in body
+                           if text.strip() != form_title:
+                               schedule_title = text.strip()
+                               search_body_for_schedule = False # Found it
+                               logging.debug(f"Found potential schedule title in body: {schedule_title}")
+                               break
+                           # Handle case where both keywords in same body phrase
+                           elif not search_body_for_form and form_title == text.strip():
+                                parts = re.split(rf"(\\b{keyword}\\b.*)", text, 1, re.IGNORECASE)
+                                if len(parts) >= 3:
+                                     form_title = parts[0].strip()
+                                     schedule_title = "".join(parts[1:]).strip()
+                                     search_body_for_schedule = False
+                                     logging.debug(f"Split form/schedule title found in body: {form_title} / {schedule_title}")
+                                     break
+
+
+             # Stop searching body if both found
+             if not search_body_for_form and not search_body_for_schedule:
+                  break
+
+
+    logging.info(f"Identified Form Title: '{form_title}', Schedule Title: '{schedule_title}' (Searched headers {'and body' if not (found_form_in_header and found_schedule_in_header) else ''})")
     return {"form_title": form_title, "schedule_title": schedule_title}
 
 def determine_amount_unit(all_text_phrases: List[Dict[str, Any]]) -> AmountUnit:
@@ -263,7 +362,7 @@ def extract_phrases_and_line_items(
         if not is_line_item:
             phrase_text = " ".join(w['text'] for w in word_list)
             output_phrase = {
-                "phrase": phrase_text,
+                "text": phrase_text,
                 "position": phrase_data['position']
             }
             # Use >= for header threshold comparison
@@ -345,7 +444,7 @@ def associate_line_labels(
                     min_horizontal_distance = horizontal_distance
                     best_match_phrase_data = phrase
 
-        label_text = best_match_phrase_data['phrase'] if best_match_phrase_data else None
+        label_text = best_match_phrase_data['text'] if best_match_phrase_data else None
         label_pos = best_match_phrase_data['position'] if best_match_phrase_data else None
 
         combined_pos = None
@@ -561,7 +660,7 @@ def parse_pdf_page_structure(
             # --- Determine overall context --- 
             all_phrases_for_unit = header_phrases + body_phrases
             amount_unit = determine_amount_unit(all_phrases_for_unit)
-            title_info = extract_form_schedule_titles(header_phrases)
+            title_info = extract_form_schedule_titles(header_phrases, body_phrases)
 
             # --- Associate labels to line items --- 
             labeled_lines = associate_line_labels(line_items, body_phrases)
