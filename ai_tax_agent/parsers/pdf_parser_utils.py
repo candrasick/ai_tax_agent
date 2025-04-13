@@ -602,3 +602,58 @@ def parse_pdf_page_structure(
     except Exception as e:
         logging.error(f"An error occurred during PDF processing for page {page_num_one_indexed}: {e}", exc_info=True)
         return None
+
+def parse_full_pdf_structure(
+    pdf_path: str,
+    start_page: int = 1
+) -> List[Dict[str, Any]]:
+    """Parses a PDF document page by page starting from a given page number.
+
+    Iterates through pages, calling parse_pdf_page_structure for each, and aggregates
+    the results.
+
+    Args:
+        pdf_path: Path to the PDF file.
+        start_page: The 1-based page number to start parsing from.
+
+    Returns:
+        A list of dictionaries, where each dictionary contains the parsed
+        structure for a single page ('page_number', 'form_title', 'schedule_title',
+        'amount_unit', 'line_items').
+    """
+    if not os.path.exists(pdf_path):
+        logging.error(f"PDF file not found at {pdf_path}")
+        return []
+
+    all_pages_data = []
+    total_pages = 0
+
+    try:
+        logging.getLogger("pdfminer").setLevel(logging.ERROR) # Keep pdfminer quiet
+        with pdfplumber.open(pdf_path) as pdf:
+            total_pages = len(pdf.pages)
+            logging.info(f"Starting PDF parsing for '{os.path.basename(pdf_path)}' from page {start_page} up to {total_pages}.")
+
+            if start_page < 1 or start_page > total_pages:
+                logging.error(f"Start page {start_page} is out of range (1-{total_pages}).")
+                return []
+
+            # Iterate from start_page (1-indexed) up to total_pages
+            for page_num in range(start_page, total_pages + 1):
+                logging.info(f"Processing page {page_num}/{total_pages}...")
+                page_data = parse_pdf_page_structure(pdf_path, page_num)
+
+                if page_data:
+                    page_data['page_number'] = page_num # Add page number to the result
+                    all_pages_data.append(page_data)
+                else:
+                    logging.warning(f"Skipping page {page_num} due to parsing errors or no structure found.")
+
+    except Exception as e:
+        logging.error(f"An error occurred while opening or iterating through '{pdf_path}': {e}", exc_info=True)
+        # Optionally return partially collected data or empty list
+        # return all_pages_data
+        return []
+
+    logging.info(f"Finished parsing. Successfully processed {len(all_pages_data)} pages out of {total_pages - start_page + 1} attempted.")
+    return all_pages_data

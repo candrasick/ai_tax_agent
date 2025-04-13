@@ -1,4 +1,4 @@
-.PHONY: db-migrate download-bulletins analyze-size analyze-mentions parse-tax-code parse-tax-code-custom analyze-amendments analyze-amendments-limit visualize-amendments parse-bulletins parse-bulletins-clear link-bulletins link-bulletins-clear test test-unit test-integration test-db-integrity test-form-integrity scrape-instructions scrape-instructions-clear extract-form-fields extract-form-fields-clear extract-form-fields-llm extract-form-fields-llm-limit index-sections index-sections-clear index-instructions index-instructions-clear test-chroma-integrity analyze-mcid test-chroma-indexing lint
+.PHONY: db-migrate download-bulletins analyze-size analyze-mentions parse-tax-code parse-tax-code-custom analyze-amendments analyze-amendments-limit visualize-amendments parse-bulletins parse-bulletins-clear link-bulletins link-bulletins-clear test test-unit test-integration test-db-integrity test-form-integrity scrape-instructions scrape-instructions-clear extract-form-fields extract-form-fields-clear extract-form-fields-llm extract-form-fields-llm-limit index-sections index-sections-clear index-instructions index-instructions-clear test-chroma-integrity analyze-mcid test-chroma-indexing lint parse-pdf-structure parse-pdf-mcid parse-pdf-json
 
 db-migrate:
 	@echo "Applying database migrations..."
@@ -150,3 +150,13 @@ test-chroma-indexing:
 
 lint:
 	poetry run ruff check .
+
+# PDF Parsing
+parse-pdf-structure: ## Parse a specific PDF page structure
+	poetry run python scripts/parse_pdf_structure.py --pdf-path $(PDF_PATH) --page-num $(PAGE_NUM)
+
+parse-pdf-mcid: ## Analyze PDF MCIDs for a specific page
+	poetry run python scripts/analyze_pdf_mcid.py --pdf-path $(PDF_PATH) --page-num $(PAGE_NUM)
+
+parse-pdf-json: ## Parse a full PDF to JSON, validating pages
+	poetry run python scripts/parse_pdf_to_json.py --pdf-path $(PDF_PATH) --start-page $(START_PAGE)
