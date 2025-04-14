@@ -22,6 +22,8 @@ except ImportError:
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+# Suppress noisy pdfminer warnings (like missing CropBox)
+logging.getLogger("pdfminer").setLevel(logging.ERROR)
 
 def validate_page_data(page_data: dict) -> bool:
     """Validates if a single page's parsed data contains essential fields."""

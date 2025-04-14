@@ -68,7 +68,16 @@ def test_extract_titles_from_individuals_pdf():
                 form_title = title_info.get("form_title")
                 schedule_title = title_info.get("schedule_title")
                 
-                if not (form_title or schedule_title):
+                title_found = bool(form_title or schedule_title)
+                is_page_number = False
+                if form_title:
+                     # Check if the extracted form title is just the page number
+                     if form_title.strip() == str(page_num):
+                          is_page_number = True
+                          logging.warning(f"Page {page_num}: Extracted form_title '{form_title}' matches the page number.")
+                          
+
+                if not title_found or is_page_number:
                     logging.warning(f"Page {page_num}: Failed to extract form_title or schedule_title. Found headers: {[h['text'] for h in header_phrases[:3]]}...")
                     failed_pages.append(page_num)
 
