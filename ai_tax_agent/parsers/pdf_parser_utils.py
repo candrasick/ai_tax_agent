@@ -850,11 +850,159 @@ Example JSON Output:
 
     return result
 
+# --- LLM Fallback for Amount Extraction ---
+def extract_blue_amounts_llm(
+    page: pdfplumber.page.Page,
+    model_name: str = "gemini-1.5-flash-latest"
+) -> List[Dict[str, Any]]:
+    """Extracts text identified as blue by an LLM, along with estimated positions.
+
+    Used as a fallback if heuristic color detection finds no amounts.
+    Filters results to keep only potentially numeric text.
+
+    Args:
+        page: The pdfplumber Page object.
+        model_name: The name of the multimodal model to use.
+
+    Returns:
+        A list of dictionaries, each with 'amount' (str) and 'position' (list),
+        matching the format of `extract_amounts_by_color`.
+    """
+    extracted_amounts = []
+    try:
+        from PIL import Image
+    except ImportError as e:
+        logging.error(f"Missing required library Pillow for LLM blue amount extraction: {e}. Please install it.")
+        return []
+
+    try:
+        # 1. Convert page to image
+        img = page.to_image(resolution=150)
+        buffer = BytesIO()
+        img.save(buffer, format="PNG")
+        img_base64 = base64.b64encode(buffer.getvalue()).decode('utf-8')
+        img_data_uri = f"data:image/png;base64,{img_base64}"
+
+        # 2. Construct Prompt
+        system_prompt = (
+            "You are an expert assistant specialized in analyzing PDF tax form images. "
+            "Your task is to identify all text elements that appear distinctly blue, extract their text content, "
+            "and estimate their bounding box coordinates."
+        )
+
+        human_prompt_text = f"""
+Analyze the provided image of a form page.
+
+1.  **Identify Blue Text:** Locate all text elements that are rendered in a distinct blue color.
+2.  **Extract Text and Position:** For each blue text element found, extract its exact text content and estimate its bounding box `[x0, y0, x1, y1]`. Coordinates should be based on the image dimensions (origin top-left).
+
+**Output Format:**
+Output ONLY a single JSON list of objects. Each object in the list should represent one piece of blue text and contain:
+*   `amount`: The extracted text content (string).
+*   `position`: A list of four numbers representing the estimated bounding box `[x0, y0, x1, y1]`.
+
+Example JSON Output:
+```json
+[
+  {{"amount": "1,234,567", "position": [450.5, 100.2, 510.8, 112.0]}},
+  {{"amount": "(987)", "position": [451.0, 120.5, 505.0, 132.8]}}
+]
+```
+If no blue text is found, output an empty list `[]`.
+"""
+
+        # 3. Initialize and Call LLM
+        if not settings.gemini_api_key:
+             logging.error("GEMINI_API_KEY not found for LLM blue amount extraction.")
+             return []
+
+        llm = ChatGoogleGenerativeAI(model=model_name, google_api_key=settings.gemini_api_key, temperature=0.1)
+        logging.info(f"Page {page.page_number + 1}: Calling multimodal LLM ({model_name}) for blue amount extraction fallback...")
+
+        message = HumanMessage(
+            content=[
+                {"type": "text", "text": human_prompt_text},
+                {"type": "image_url", "image_url": {"url": img_data_uri}},
+            ]
+        )
+        response = llm.invoke([SystemMessage(content=system_prompt), message])
+        response_content = response.content
+        logging.debug(f"LLM Blue Amount Response received (page {page.page_number + 1}): {response_content[:500]}...")
+
+        # 4. Parse and Filter Response
+        parsed_data = None
+        try:
+            # Find JSON block (list in this case)
+            json_match = re.search(r"```json\s*\n?(\[.*?\])\n?\s*```", response_content, re.DOTALL | re.IGNORECASE)
+            if json_match:
+                json_string = json_match.group(1).strip()
+                if json_string:
+                    try: parsed_data = json.loads(json_string)
+                    except json.JSONDecodeError as e: logging.error(f"Page {page.page_number + 1}: Failed to parse extracted JSON blue amount list: {e}\nString: {json_string}")
+                else: logging.warning(f"Page {page.page_number + 1}: Regex matched JSON block for blue amounts, but captured string was empty.")
+            else:
+                logging.warning(f"Page {page.page_number + 1}: Could not find JSON list block ```json...``` in blue amount response. Attempting to parse entire response.")
+                cleaned_response = response_content.strip()
+                if cleaned_response:
+                    try: parsed_data = json.loads(cleaned_response)
+                    except json.JSONDecodeError as e: logging.error(f"Page {page.page_number + 1}: Failed to parse entire LLM blue amount response as JSON: {e}\nResponse: {response_content}")
+                else: logging.warning(f"Page {page.page_number + 1}: LLM blue amount response was empty after stripping whitespace.")
+
+            # Validate and filter
+            if isinstance(parsed_data, list):
+                count_before_filter = len(parsed_data)
+                for item in parsed_data:
+                    if not isinstance(item, dict) or 'amount' not in item or 'position' not in item:
+                        logging.warning(f"Skipping invalid item in LLM blue amount list: {item}")
+                        continue
+                    pos = item['position']
+                    if not isinstance(pos, list) or len(pos) != 4:
+                        logging.warning(f"Skipping item with invalid position in LLM blue amount list: {item}")
+                        continue
+                    try:
+                        # Convert position elements to float, handle potential errors
+                        item['position'] = [float(p) for p in pos]
+                    except (ValueError, TypeError):
+                         logging.warning(f"Skipping item with non-numeric position values: {item}")
+                         continue
+
+                    # Filter for potentially numeric text
+                    amount_text = str(item['amount']).strip()
+                    cleaned_text = amount_text.replace(",", "")
+                    # Handle parentheses for negatives
+                    if cleaned_text.startswith('(') and cleaned_text.endswith(')'):
+                        cleaned_text = '-' + cleaned_text[1:-1]
+                    
+                    is_numeric = False
+                    try:
+                        float(cleaned_text)
+                        is_numeric = True
+                    except ValueError:
+                        pass # Not numeric
+
+                    if is_numeric:
+                        # Keep original amount text, but add validated position
+                        extracted_amounts.append({"amount": amount_text, "position": item['position']})
+                    else:
+                         logging.debug(f"Skipping non-numeric blue text from LLM: '{amount_text}'")
+                logging.info(f"Page {page.page_number + 1}: LLM fallback found {count_before_filter} blue elements, kept {len(extracted_amounts)} potential numeric amounts after filtering.")
+            else:
+                logging.error(f"Page {page.page_number + 1}: Parsed LLM blue amount response was not a list. Parsed: {str(parsed_data)[:200]}...")
+
+        except Exception as e:
+            logging.error(f"Page {page.page_number + 1}: Error processing LLM blue amount response content: {e}", exc_info=True)
+
+    except Exception as e:
+        logging.error(f"Page {page.page_number + 1}: Error during LLM blue amount extraction: {e}", exc_info=True)
+
+    return extracted_amounts
+
 # --- Main Orchestration Function --- 
 def parse_pdf_page_structure(
     pdf_path: str,
     page_num_one_indexed: int,
     amount_color_tuple: Tuple[float, float, float] = (0, 0, 0.5), # Example: Dark Blue
+    forced_amount_unit: Optional[str] = None, # New optional argument
     # Heuristic parameters are no longer used directly here but kept for reference
     vertical_tolerance: float = 2,
     horizontal_tolerance: float = 5,
@@ -868,7 +1016,15 @@ def parse_pdf_page_structure(
     uses multimodal LLMs to extract titles, line items, and associate amounts.
 
     Args:
-        (See above functions for parameter details)
+        pdf_path: Path to the PDF file.
+        page_num_one_indexed: The 1-based page number to parse.
+        amount_color_tuple: Tuple representing the target RGB color for amount extraction.
+        forced_amount_unit: Optional amount unit string to override detection.
+        vertical_tolerance: Max vertical distance between word tops for same phrase.
+        horizontal_tolerance: Max horizontal distance between words for same phrase.
+        line_item_font_size_threshold: Font size below which a number is considered a line item.
+        header_font_size_threshold: Font size >= which a phrase is considered a header.
+        page_corner_threshold_pct: Percentage of page dimensions to filter corners.
 
     Returns:
         A dictionary containing the parsed structure or None if processing fails.
@@ -891,18 +1047,45 @@ def parse_pdf_page_structure(
             # --- Extract elements NOT replaced by LLM --- 
             # (Amounts by color, potentially Amount Unit determination heuristically)
             logging.debug("Extracting amounts by color...")
-            amounts = extract_amounts_by_color(page, amount_color_tuple=amount_color_tuple)
+            amounts_heuristic = extract_amounts_by_color(page, amount_color_tuple=amount_color_tuple)
+            amounts_to_associate = amounts_heuristic # Default to heuristic results
+
+            # LLM Fallback for amounts if heuristic finds nothing
+            if not amounts_heuristic:
+                logging.warning(f"Page {page.page_number + 1}: Heuristic amount extraction found nothing. Attempting LLM fallback to find blue text amounts...")
+                amounts_llm = extract_blue_amounts_llm(page)
+                if amounts_llm:
+                    amounts_to_associate = amounts_llm
+                else:
+                    logging.warning(f"Page {page.page_number + 1}: LLM fallback also found no blue text amounts.")
+            else:
+                logging.info(f"Page {page.page_number + 1}: Heuristic found {len(amounts_heuristic)} potential amounts.")
             
             # NOTE: Amount Unit determination MIGHT also be included in the structure LLM call
             #       or kept separate. Keeping separate for now.
             #       Requires phrases, so we need to extract them OR pass all text to LLM.
             #       For simplicity, let's extract phrases just for unit detection for now.
-            logging.debug("Extracting phrases for unit detection...")
-            # Using a basic word extraction for unit detection context
-            all_words = page.extract_words()
-            all_text_for_unit = " ".join([w.get('text','') for w in all_words])
-            logging.debug("Determining amount unit...")
-            amount_unit = determine_amount_unit([{'text': all_text_for_unit}]) # Pass as a single phrase
+            amount_unit: Optional[AmountUnit] = None # Initialize
+            if forced_amount_unit:
+                try:
+                    amount_unit = AmountUnit(forced_amount_unit) # Convert string to Enum
+                    logging.debug(f"Using forced amount unit: {amount_unit}")
+                except ValueError:
+                    logging.error(f"Invalid value provided for forced_amount_unit: '{forced_amount_unit}'. Falling back to detection.")
+                    # Fall through to heuristic detection if forced value is invalid
+            
+            # Only run heuristic detection if unit wasn't forced or forced value was invalid
+            if amount_unit is None:
+                 logging.debug("Extracting phrases for unit detection...")
+                 all_words = page.extract_words()
+                 all_text_for_unit = " ".join([w.get('text','') for w in all_words])
+                 logging.debug("Determining amount unit...")
+                 amount_unit = determine_amount_unit([{'text': all_text_for_unit}])
+            
+            # If still somehow None after both attempts, default to UNKNOWN
+            if amount_unit is None:
+                logging.warning("Amount unit determination failed, defaulting to UNKNOWN.")
+                amount_unit = AmountUnit.UNKNOWN
 
             # --- Use LLM for Titles and Line Items --- 
             logging.debug("Extracting structure (titles, line items) via multimodal LLM...")
@@ -919,7 +1102,7 @@ def parse_pdf_page_structure(
             # The structure_data['line_items'] already has this format.
             # However, the amount associator might benefit from position info if available.
             # For now, just pass the essential info extracted by the structure LLM.
-            amount_map = associate_amounts_multimodal(page, llm_extracted_line_items, amounts)
+            amount_map = associate_amounts_multimodal(page, llm_extracted_line_items, amounts_to_associate)
 
             # --- Build final output --- 
             # Use the line items extracted by the structure LLM
@@ -943,7 +1126,7 @@ def parse_pdf_page_structure(
             final_output = {
                 "form_title": form_title, # From structure LLM
                 "schedule_title": schedule_title, # From structure LLM
-                "amount_unit": amount_unit.value, # From heuristic for now
+                "amount_unit": amount_unit.value, # From forced value or heuristic
                 "line_items": output_line_items # From structure LLM + amount LLM
             }
             logging.info(f"Successfully parsed structure for page {page.page_number + 1}.")
@@ -955,7 +1138,8 @@ def parse_pdf_page_structure(
 
 def parse_full_pdf_structure(
     pdf_path: str,
-    start_page: int = 1
+    start_page: int = 1,
+    forced_amount_unit: Optional[str] = None # Add the new argument here too
 ) -> List[Dict[str, Any]]:
     """Parses a PDF document page by page starting from a given page number.
 
@@ -965,6 +1149,7 @@ def parse_full_pdf_structure(
     Args:
         pdf_path: Path to the PDF file.
         start_page: The 1-based page number to start parsing from.
+        forced_amount_unit: Optional amount unit string to override detection.
 
     Returns:
         A list of dictionaries, where each dictionary contains the parsed
@@ -989,10 +1174,10 @@ def parse_full_pdf_structure(
 
             # Iterate from start_page (1-indexed) up to total_pages
             for page_num in range(start_page, total_pages + 1):
-                # Logging moved inside parse_pdf_page_structure
                 page_data = parse_pdf_page_structure(
                     pdf_path=pdf_path,
-                    page_num_one_indexed=page_num
+                    page_num_one_indexed=page_num,
+                    forced_amount_unit=forced_amount_unit # Pass down
                 )
 
                 if page_data:

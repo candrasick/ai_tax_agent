@@ -49,20 +49,30 @@ def main():
     parser = argparse.ArgumentParser(description="Parse a PDF, validate pages, and output to JSON.")
     parser.add_argument("--pdf-path", required=True, help="Path to the input PDF file.")
     parser.add_argument("--start-page", type=int, default=1, help="Page number to start parsing from (1-based).")
+    parser.add_argument("--amount-unit", type=str, choices=["dollars", "forms", "individuals"], default=None, 
+                        help="Optionally specify the amount unit (dollars, forms, individuals) to override detection.")
     
     args = parser.parse_args()
 
     pdf_path = args.pdf_path
     start_page = args.start_page
+    forced_amount_unit = args.amount_unit
 
     if not os.path.exists(pdf_path):
         logging.error(f"Input PDF file not found: {pdf_path}")
         sys.exit(1)
 
-    logging.info(f"Starting PDF parsing for '{pdf_path}' from page {start_page}...")
+    log_msg = f"Starting PDF parsing for '{pdf_path}' from page {start_page}"
+    if forced_amount_unit:
+        log_msg += f" (forcing amount_unit='{forced_amount_unit}')"
+    logging.info(log_msg + "...")
     
     # Call the main parsing function from the utils module
-    all_pages_data = parse_full_pdf_structure(pdf_path, start_page=start_page)
+    all_pages_data = parse_full_pdf_structure(
+        pdf_path,
+        start_page=start_page,
+        forced_amount_unit=forced_amount_unit
+    )
 
     if not all_pages_data:
         logging.warning(f"No data was successfully parsed from '{pdf_path}'. Exiting.")

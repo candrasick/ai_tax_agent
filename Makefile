@@ -1,4 +1,4 @@
-.PHONY: db-migrate download-bulletins analyze-size analyze-mentions parse-tax-code parse-tax-code-custom analyze-amendments analyze-amendments-limit visualize-amendments parse-bulletins parse-bulletins-clear link-bulletins link-bulletins-clear test test-unit test-integration test-db-integrity test-form-integrity scrape-instructions scrape-instructions-clear extract-form-fields extract-form-fields-clear extract-form-fields-llm extract-form-fields-llm-limit index-sections index-sections-clear index-instructions index-instructions-clear test-chroma-integrity analyze-mcid test-chroma-indexing lint parse-pdf-structure parse-pdf-mcid parse-pdf-json
+.PHONY: db-migrate download-bulletins analyze-size analyze-mentions parse-tax-code parse-tax-code-custom analyze-amendments analyze-amendments-limit visualize-amendments parse-bulletins parse-bulletins-clear link-bulletins link-bulletins-clear test test-unit test-integration test-db-integrity test-form-integrity scrape-instructions scrape-instructions-clear extract-form-fields extract-form-fields-clear extract-form-fields-llm extract-form-fields-llm-limit index-sections index-sections-clear index-instructions index-instructions-clear test-chroma-integrity analyze-mcid test-chroma-indexing lint parse-pdf-structure parse-pdf-mcid parse-pdf-json analyze-page-colors
 
 db-migrate:
 	@echo "Applying database migrations..."
@@ -160,3 +160,6 @@ parse-pdf-mcid: ## Analyze PDF MCIDs for a specific page
 
 parse-pdf-json: ## Parse a full PDF to JSON, validating pages
 	poetry run python scripts/parse_pdf_to_json.py --pdf-path $(PDF_PATH) --start-page $(START_PAGE)
+
+analyze-page-colors: ## Analyze and list colors found on a specific PDF page
+	poetry run python scripts/analyze_page_colors.py --pdf-path $(PDF_PATH) --page-num $(PAGE_NUM)
