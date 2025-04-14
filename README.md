@@ -80,14 +80,33 @@ This project uses a `Makefile` to streamline common tasks. Here's a breakdown of
     *   Runs `scripts/analyze_code_size.py` to count pages in the main tax code PDF and downloaded bulletins, generating a plot of size over time (`plots/tax_code_growth.png`).
 *   `analyze-mentions`
     *   Runs `scripts/analyze_section_mentions.py` using data from the database to analyze the frequency of section mentions in bulletins and their correlation with amendment counts. Generates plots (`plots/top_bulletin_mentions_from_db.png`, `plots/mentions_amendments_correlation_from_db.png`).
-*   `test`
-    *   Runs all available tests (unit and integration).
-*   `test-unit`
-    *   Runs only the unit tests located in `tests/unit`.
-*   `test-integration`
-    *   Runs only the integration tests located in `tests/integration`.
 
-*(Note: Some targets like `parse-tax-code-custom`, `analyze-amendments`, etc., might exist but are not fully described here. Refer to the `Makefile` for details.)*
+*   **PDF Parsing (using Multimodal LLM):**
+    *   The primary approach for extracting structured data from PDF documents (like the IRS Statistics of Income PDFs) now relies on multimodal Large Language Models (LLMs) like Google Gemini Pro Vision / Flash Vision.
+    *   `parse-pdf-json PDF_PATH=<path_to.pdf> START_PAGE=<page_num>`:
+        *   Runs `scripts/parse_pdf_to_json.py`.
+        *   Processes the specified PDF starting from `START_PAGE`.
+        *   For each page, it uses two LLM calls:
+            1.  `extract_structure_multimodal`: Identifies Form Title, Schedule Title, and extracts Line Item numbers and labels based on visual layout.
+            2.  `associate_amounts_multimodal`: Associates numeric amounts (identified heuristically by color) with the line items found by the first LLM call.
+        *   Validates that essential fields (page number, title) were extracted for each page.
+        *   Outputs the aggregated structured data for all processed pages into a JSON file named `<input_pdf_name>.json` in the same directory as the input PDF.
+        *   Example: `make parse-pdf-json PDF_PATH=data/tax_statistics/individuals.pdf START_PAGE=3`
+    *   (Legacy/Experimental) `parse-pdf-structure PDF_PATH=<path> PAGE_NUM=<num>`: Parses a single page using older heuristic methods (no longer the primary approach).
+    *   (Legacy/Experimental) `parse-pdf-mcid PDF_PATH=<path> PAGE_NUM=<num>`: Analyzes Marked Content Identifiers (MCIDs) on a single page.
+
+*   **Testing:**
+    *   `test`
+        *   Runs all available tests (unit and integration).
+    *   `test-unit`
+        *   Runs only the unit tests located in `tests/unit`.
+    *   `test-integration`
+        *   Runs only the integration tests located in `tests/integration`.
+    *   To run specific integration tests:
+        *   `poetry run pytest tests/integration/test_pdf_parsing.py -s -v -k test_pdf_page_structure[26-page_26_expected.json]` (Runs the parameterized PDF parser test for page 26)
+        *   `poetry run pytest tests/integration/test_pdf_title_extraction.py -s -v` (Runs the test specifically for title extraction heuristics - potentially deprecated)
+
+*(Note: Other targets like `parse-tax-code-custom`, `analyze-amendments`, `index-*` etc., exist for specific data processing or indexing tasks. Refer to the `Makefile` for details.)*
 
 ### Database Schema (`data/tax_data.db`)
 

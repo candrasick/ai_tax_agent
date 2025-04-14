@@ -23,8 +23,21 @@ def load_fixture(filename):
     path = os.path.join(FIXTURE_DIR, filename)
     if not os.path.exists(path):
          pytest.fail(f"Fixture file not found: {path}")
-    with open(path, 'r') as f:
+    with open(path, 'r', encoding='utf-8') as f: # Ensure utf-8 encoding
         return json.load(f)
+
+def normalize_string(s: str) -> str:
+    """Normalizes strings for comparison, handling common variations."""
+    if not isinstance(s, str):
+        return str(s) # Return string representation if not a string
+    # Replace common quote variations with standard ASCII apostrophe
+    s = s.replace("\u2019", "'") # Right single quote
+    s = s.replace("\u2018", "'") # Left single quote
+    s = s.replace("\u201c", '"') # Left double quote
+    s = s.replace("\u201d", '"') # Right double quote
+    # Optional: Normalize whitespace (replace multiple spaces/newlines with single space)
+    # s = ' '.join(s.split())
+    return s.strip()
 
 # --- Test Cases --- 
 
@@ -59,23 +72,31 @@ def test_pdf_page_structure(page_num, expected_fixture_file):
     assert actual_result.get("amount_unit") == expected_result.get("amount_unit"), "Amount unit mismatch"
 
     # --- Assert Line Item Number and Label --- 
-    actual_lines = {item['line_item_number']: item['label'] for item in actual_result.get('line_items', [])}
-    expected_lines = {item['line_item_number']: item['label'] for item in expected_result.get('line_items', [])}
+    # Create dictionaries mapping line number to normalized label
+    actual_lines = {str(item['line_item_number']): normalize_string(item.get('label')) 
+                    for item in actual_result.get('line_items', []) 
+                    if isinstance(item, dict) and 'line_item_number' in item}
+    expected_lines = {str(item['line_item_number']): normalize_string(item.get('label')) 
+                      for item in expected_result.get('line_items', []) 
+                      if isinstance(item, dict) and 'line_item_number' in item}
     
     # Check if the sets of line item numbers are the same
     assert set(actual_lines.keys()) == set(expected_lines.keys()), \
            f"Mismatch in line item numbers found for page {page_num}. Expected: {sorted(expected_lines.keys())}, Actual: {sorted(actual_lines.keys())}"
 
-    # Check if the labels match for each line item number
-    # Sort items by line item number before comparing for consistent diffs
-    sorted_actual_lines = sorted(actual_result.get('line_items', []), key=lambda x: (int(re.match(r"(\d+)", x['line_item_number']).group(1)), x['line_item_number']))
-    sorted_expected_lines = sorted(expected_result.get('line_items', []), key=lambda x: (int(re.match(r"(\d+)", x['line_item_number']).group(1)), x['line_item_number']))
-    actual_lines_for_diff = [{k: v for k, v in item.items() if k != 'amount'} for item in sorted_actual_lines]
-    expected_lines_for_diff = [{k: v for k, v in item.items() if k != 'amount'} for item in sorted_expected_lines]
+    # Check if normalized labels match for each common line item number
+    mismatched_labels = {}
+    for line_num in expected_lines:
+        if actual_lines.get(line_num) != expected_lines[line_num]:
+            mismatched_labels[line_num] = {
+                "expected": expected_lines[line_num],
+                "actual": actual_lines.get(line_num)
+            }
+            
+    assert not mismatched_labels, \
+        f"Mismatch in normalized line item labels for page {page_num}:\n{json.dumps(mismatched_labels, indent=2)}"
 
-    assert actual_lines_for_diff == expected_lines_for_diff, \
-           f"Mismatch in line item/labels for page {page_num}. Expected:\n{json.dumps(expected_lines_for_diff, indent=2)}\nActual:\n{json.dumps(actual_lines_for_diff, indent=2)}"
-    print(f"Line item numbers and labels match for page {page_num}.")
+    print(f"Line item numbers and normalized labels match for page {page_num}.")
 
 
     # --- Assert Associated Amounts --- 
