@@ -1,6 +1,6 @@
 from sqlalchemy.orm import declarative_base
 from sqlalchemy import (Column, Integer, String, Text, Boolean, 
-                        Date, TIMESTAMP, ForeignKey, func, UniqueConstraint)
+                        Date, TIMESTAMP, ForeignKey, func, UniqueConstraint, Numeric)
 from sqlalchemy.orm import relationship
 
 # Base class for all ORM models
@@ -129,15 +129,41 @@ class FormField(Base):
     
     id = Column(Integer, primary_key=True)
     instruction_id = Column(Integer, ForeignKey('form_instructions.id', ondelete='CASCADE'), nullable=False, index=True)
-    field_label = Column(String(100), nullable=False)  # e.g., "Line 1g. Other proceedings."
-    full_text = Column(Text, nullable=False)  # The complete instruction text for this field
+    field_label = Column(String(100), index=True)
+    full_text = Column(Text, nullable=False)
     created_at = Column(TIMESTAMP, server_default=func.now(), nullable=False)
     
     # Relationship to parent instruction
     instruction = relationship("FormInstruction", back_populates="fields")
-    
+    # Relationship to US Code Sections (many-to-many through FormFieldUsCodeSectionLink)
+    section_links = relationship("FormFieldUsCodeSectionLink", back_populates="form_field", cascade="all, delete-orphan")
+    # Relationship to statistics (one-to-one)
+    statistics = relationship("FormFieldStatistics", back_populates="form_field", uselist=False, cascade="all, delete-orphan")
+
     def __repr__(self):
         return f"<FormField(field_label='{self.field_label}')>"
+
+# --- New FormFieldStatistics Model --- #
+class FormFieldStatistics(Base):
+    __tablename__ = 'form_field_statistics'
+
+    # Use form_field_id as the primary key to enforce 1-to-1 relationship
+    form_field_id = Column(Integer, ForeignKey('form_fields.id', ondelete='CASCADE'), primary_key=True)
+    
+    # Optional numeric fields for statistics
+    # Using Numeric for flexibility, could also use Integer or Float
+    dollars = Column(Numeric, nullable=True) 
+    forms = Column(Numeric, nullable=True)
+    people = Column(Numeric, nullable=True) # Changed from 'persons' for consistency
+
+    created_at = Column(TIMESTAMP, server_default=func.now(), nullable=False)
+    updated_at = Column(TIMESTAMP, server_default=func.now(), onupdate=func.now(), nullable=False)
+
+    # Relationship back to FormField (one-to-one)
+    form_field = relationship("FormField", back_populates="statistics")
+
+    def __repr__(self):
+        return f"<FormFieldStatistics(form_field_id={self.form_field_id})>"
 
 # --- Association Object Model: FormField <-> UsCodeSection --- #
 class FormFieldUsCodeSectionLink(Base):
