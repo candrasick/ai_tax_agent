@@ -1,0 +1,18 @@
+Analyze the provided image of a form page.
+Here is a list of identified line items with their labels and approximate bounding boxes [x0, top, x1, bottom]:
+```json
+{prompt_lines_json}
+```
+
+Here is a list of identified numeric amounts and their bounding boxes:
+```json
+{prompt_amounts_json}
+```
+Note: These numeric amounts often appear in a distinct blue color in the image.
+
+Based on the visual layout in the image, associate each amount with the single most likely line item number it corresponds to. Consider typical form layouts where amounts appear in columns to the right of or below labels.
+
+Output ONLY a JSON object mapping the line_item_number (string) to the corresponding amount (string).
+If a line item number from the input list does not have an associated amount in the image, its value should be null in the output JSON.
+If an amount cannot be confidently associated with any line item, omit it from the output map.
+Example output format: {{"1": "123,456", "2a": "789", "3": null}} 

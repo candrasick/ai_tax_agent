@@ -559,7 +559,9 @@ def associate_amounts_multimodal(
     page: pdfplumber.page.Page,
     labeled_lines: List[Dict[str, Any]],
     amounts: List[Dict[str, Any]],
-    model_name: str = "gemini-1.5-flash-latest"
+    model_name: str = "gemini-1.5-flash-latest",
+    unassigned_threshold: int = 3,
+    prompt_template_path_override: Optional[str] = None
 ) -> Dict[str, Optional[str]]:
     """Associates amounts with line items using a multimodal LLM.
 
@@ -568,6 +570,8 @@ def associate_amounts_multimodal(
         labeled_lines: List of dicts with 'line_item_number', 'label', 'combined_position'.
         amounts: List of dicts with 'amount' and 'position'.
         model_name: The name of the multimodal model to use.
+        unassigned_threshold: Threshold for unassigned amounts.
+        prompt_template_path_override: Optional path to override the default prompt template.
 
     Returns:
         A dictionary mapping line_item_number (str) to amount_text (str or None).
@@ -623,31 +627,32 @@ def associate_amounts_multimodal(
                  "pos": [round(p, 1) for p in pos] if pos else None
              })
 
-        # 3. Construct Prompt
+        # 3. Load and Format Prompt
         system_prompt = "You are an expert assistant analyzing PDF form structures. Your task is to associate numeric amounts with the correct line item based on their positions in the provided image and data."
         prompt_lines_json = json.dumps(prompt_lines, indent=2)
         prompt_amounts_json = json.dumps(prompt_amounts, indent=2)
 
-        human_prompt_text = f"""
-Analyze the provided image of a form page.
-Here is a list of identified line items with their labels and approximate bounding boxes [x0, top, x1, bottom]:
-```json
-{prompt_lines_json}
-```
+        # Use override path if provided, otherwise use default
+        if prompt_template_path_override:
+            prompt_template_path = prompt_template_path_override
+            logging.debug(f"Using overridden prompt template path: {prompt_template_path}")
+        else:
+            prompt_template_path = os.path.join(os.path.dirname(__file__), '..', '..', 'prompts', 'associate_amounts_multimodal.txt')
+            logging.debug(f"Using default prompt template path: {prompt_template_path}")
 
-Here is a list of identified numeric amounts and their bounding boxes:
-```json
-{prompt_amounts_json}
-```
-Note: These numeric amounts often appear in a distinct blue color in the image.
-
-Based on the visual layout in the image, associate each amount with the single most likely line item number it corresponds to. Consider typical form layouts where amounts appear in columns to the right of or below labels.
-
-Output ONLY a JSON object mapping the line_item_number (string) to the corresponding amount (string).
-If a line item number from the input list does not have an associated amount in the image, its value should be null in the output JSON.
-If an amount cannot be confidently associated with any line item, omit it from the output map.
-Example output format: {{"1": "123,456", "2a": "789", "3": null}}
-"""
+        try:
+            with open(prompt_template_path, 'r', encoding='utf-8') as f:
+                prompt_template = f.read()
+            human_prompt_text = prompt_template.format(
+                prompt_lines_json=prompt_lines_json,
+                prompt_amounts_json=prompt_amounts_json
+            )
+        except FileNotFoundError:
+            logging.error(f"Prompt template file not found at: {prompt_template_path}")
+            return amount_map # Cannot proceed without prompt
+        except Exception as e:
+            logging.error(f"Error loading or formatting prompt from {prompt_template_path}: {e}")
+            return amount_map
 
         # 4. Initialize and Call LLM
         if not settings.gemini_api_key:
@@ -677,15 +682,15 @@ Example output format: {{"1": "123,456", "2a": "789", "3": null}}
                 logging.debug(f"Found JSON block, attempting to parse: {json_string[:100]}...")
                 if json_string:
                     try: parsed_map = json.loads(json_string)
-                    except json.JSONDecodeError as e: logging.error(f"Failed to parse extracted JSON string: {e}\nString: {json_string}")
-                else: logging.warning("Regex matched JSON block, but captured string was empty.")
+                    except json.JSONDecodeError as e: logging.error(f"Page {page.page_number}: Failed to parse extracted JSON string: {e}\nString: {json_string}")
+                else: logging.warning(f"Page {page.page_number}: Regex matched JSON block, but captured string was empty.")
             else:
-                logging.warning("Could not find JSON block ```json...``` in response. Attempting to parse entire response.")
+                logging.warning(f"Page {page.page_number}: Could not find JSON block ```json...``` in response. Attempting to parse entire response.")
                 try:
                     cleaned_response = response_content.strip()
                     if cleaned_response: parsed_map = json.loads(cleaned_response)
-                    else: logging.warning("LLM response content was empty after stripping whitespace.")
-                except json.JSONDecodeError as e: logging.error(f"Failed to parse entire LLM response as JSON: {e}\nResponse: {response_content}")
+                    else: logging.warning(f"Page {page.page_number}: LLM response content was empty after stripping whitespace.")
+                except json.JSONDecodeError as e: logging.error(f"Page {page.page_number}: Failed to parse entire LLM response as JSON: {e}\nResponse: {response_content}")
 
             # Validate and update
             if parsed_map and isinstance(parsed_map, dict):
@@ -694,15 +699,40 @@ Example output format: {{"1": "123,456", "2a": "789", "3": null}}
                      if ln in amount_map:
                           amount_map[ln] = str(amt) if amt is not None else None
                           update_count += 1
-                     else: logging.warning(f"LLM returned amount for unexpected line number: {ln}")
+                     else: logging.warning(f"Page {page.page_number}: LLM returned amount for unexpected line number: {ln}")
                  logging.info(f"Page {page.page_number}: Successfully parsed and applied LLM amount map for {update_count} lines.")
             else:
-                if parsed_map is not None: logging.error(f"Parsed LLM response was not dict: type={type(parsed_map)}, content={str(parsed_map)[:200]}...")
+                if parsed_map is not None: logging.error(f"Page {page.page_number}: Parsed LLM response was not dict: type={type(parsed_map)}, content={str(parsed_map)[:200]}...")
+
+            # --- Qualitative Check --- 
+            assigned_count = sum(1 for amt in amount_map.values() if amt is not None)
+            total_input_amounts = len(amounts)
+            # Estimate unassigned by comparing input count to non-null assignments
+            # Note: This is an estimate. It might be inaccurate if the LLM assigns 
+            # the same input amount value to multiple lines or hallucinates amounts.
+            unassigned_count = total_input_amounts - assigned_count
+            
+            if unassigned_count > unassigned_threshold:
+                logging.warning(
+                    f"Page {page.page_number}: High number of unassigned amounts detected. "
+                    f"{unassigned_count} input amounts were not assigned to line items (threshold: {unassigned_threshold}). "
+                    f"Consider reviewing the prompt ('{prompt_template_path}') or LLM output."
+                )
+            elif unassigned_count < 0:
+                 # This might happen if LLM hallucinates amounts not in the input list.
+                 logging.warning(
+                     f"Page {page.page_number}: More amounts assigned ({assigned_count}) than provided ({total_input_amounts}). "
+                     f"LLM might have hallucinated amounts."
+                 )
+            else:
+                logging.info(f"Page {page.page_number}: {assigned_count}/{total_input_amounts} input amounts were assigned.")
+            # --- End Qualitative Check ---
+
         except Exception as e:
-            logging.error(f"Error processing LLM response content: {e}\nResponse: {response_content}", exc_info=True)
+            logging.error(f"Page {page.page_number}: Error processing LLM response content: {e}", exc_info=True)
 
     except ImportError:
-         logging.error("Pillow library not found. Please install it (`pip install Pillow`).")
+         logging.error(f"Pillow library not found. Please install it (`pip install Pillow`).")
     except Exception as e:
         logging.error(f"Page {page.page_number}: Error during multimodal amount association: {e}", exc_info=True)
 
@@ -793,7 +823,7 @@ Example JSON Output:
              return result
 
         llm = ChatGoogleGenerativeAI(model=model_name, google_api_key=settings.gemini_api_key, temperature=0.1)
-        logging.info(f"Page {page.page_number + 1}: Calling multimodal LLM ({model_name}) for structure extraction (titles, lines)...")
+        logging.info(f"Page {page.page_number}: Calling multimodal LLM ({model_name}) for structure extraction (titles, lines)...")
 
         message = HumanMessage(
             content=[
@@ -803,7 +833,7 @@ Example JSON Output:
         )
         response = llm.invoke([SystemMessage(content=system_prompt), message])
         response_content = response.content
-        logging.debug(f"LLM Structure Response received (page {page.page_number + 1}): {response_content[:500]}...")
+        logging.debug(f"LLM Structure Response received (page {page.page_number}): {response_content[:500]}...")
 
         # 4. Parse Response (using robust method)
         parsed_data = None
@@ -813,15 +843,15 @@ Example JSON Output:
                 json_string = json_match.group(1).strip()
                 if json_string:
                     try: parsed_data = json.loads(json_string)
-                    except json.JSONDecodeError as e: logging.error(f"Page {page.page_number + 1}: Failed to parse extracted JSON structure string: {e}\nString: {json_string}")
-                else: logging.warning(f"Page {page.page_number + 1}: Regex matched JSON block for structure, but captured string was empty.")
+                    except json.JSONDecodeError as e: logging.error(f"Page {page.page_number}: Failed to parse extracted JSON structure string: {e}\nString: {json_string}")
+                else: logging.warning(f"Page {page.page_number}: Regex matched JSON block for structure, but captured string was empty.")
             else:
-                logging.warning(f"Page {page.page_number + 1}: Could not find JSON block ```json...``` in structure response. Attempting to parse entire response.")
+                logging.warning(f"Page {page.page_number}: Could not find JSON block ```json...``` in structure response. Attempting to parse entire response.")
                 cleaned_response = response_content.strip()
                 if cleaned_response:
                     try: parsed_data = json.loads(cleaned_response)
-                    except json.JSONDecodeError as e: logging.error(f"Page {page.page_number + 1}: Failed to parse entire LLM structure response as JSON: {e}\nResponse: {response_content}")
-                else: logging.warning(f"Page {page.page_number + 1}: LLM structure response was empty after stripping whitespace.")
+                    except json.JSONDecodeError as e: logging.error(f"Page {page.page_number}: Failed to parse entire LLM structure response as JSON: {e}\nResponse: {response_content}")
+                else: logging.warning(f"Page {page.page_number}: LLM structure response was empty after stripping whitespace.")
 
             # Basic validation of parsed structure
             if isinstance(parsed_data, dict) and isinstance(parsed_data.get('line_items'), list):
@@ -836,24 +866,25 @@ Example JSON Output:
                             "label": str(item['label']) # Ensure string
                         })
                     else:
-                        logging.warning(f"Page {page.page_number + 1}: Skipping invalid line item structure: {item}")
+                        logging.warning(f"Page {page.page_number}: Skipping invalid line item structure: {item}")
                 result["line_items"] = validated_lines
-                logging.info(f"Page {page.page_number + 1}: Successfully parsed structure from LLM: Title='{result['form_title']}', Schedule='{result['schedule_title']}', Found {len(result['line_items'])} line items.")
+                logging.info(f"Page {page.page_number}: Successfully parsed structure from LLM: Title='{result['form_title']}', Schedule='{result['schedule_title']}', Found {len(result['line_items'])} line items.")
             else:
-                logging.error(f"Page {page.page_number + 1}: Parsed LLM structure response was not a valid dictionary or missing 'line_items' list. Parsed: {str(parsed_data)[:200]}...")
+                logging.error(f"Page {page.page_number}: Parsed LLM structure response was not a valid dictionary or missing 'line_items' list. Parsed: {str(parsed_data)[:200]}...")
 
         except Exception as e:
-            logging.error(f"Page {page.page_number + 1}: Error processing LLM structure response content: {e}", exc_info=True)
+            logging.error(f"Page {page.page_number}: Error processing LLM structure response content: {e}", exc_info=True)
 
     except Exception as e:
-        logging.error(f"Page {page.page_number + 1}: Error during multimodal structure extraction: {e}", exc_info=True)
+        logging.error(f"Page {page.page_number}: Error during multimodal structure extraction: {e}", exc_info=True)
 
     return result
 
 # --- LLM Fallback for Amount Extraction ---
 def extract_blue_amounts_llm(
     page: pdfplumber.page.Page,
-    model_name: str = "gemini-1.5-flash-latest"
+    model_name: str = "gemini-1.5-flash-latest",
+    prompt_template_path_override: Optional[str] = None
 ) -> List[Dict[str, Any]]:
     """Extracts text identified as blue by an LLM, along with estimated positions.
 
@@ -863,6 +894,7 @@ def extract_blue_amounts_llm(
     Args:
         page: The pdfplumber Page object.
         model_name: The name of the multimodal model to use.
+        prompt_template_path_override: Optional path to override the default prompt template.
 
     Returns:
         A list of dictionaries, each with 'amount' (str) and 'position' (list),
@@ -883,33 +915,31 @@ def extract_blue_amounts_llm(
         img_base64 = base64.b64encode(buffer.getvalue()).decode('utf-8')
         img_data_uri = f"data:image/png;base64,{img_base64}"
 
-        # 2. Construct Prompt
+        # 2. Load and Construct Prompt
         system_prompt = (
             "You are an expert assistant specialized in analyzing PDF tax form images. "
             "Your task is to identify all text elements that appear distinctly blue, extract their text content, "
             "and estimate their bounding box coordinates."
         )
 
-        human_prompt_text = f"""
-Analyze the provided image of a form page.
+        # Determine prompt path (override or default)
+        if prompt_template_path_override:
+            prompt_path = prompt_template_path_override
+            logging.debug(f"Using overridden blue amount prompt: {prompt_path}")
+        else:
+            prompt_path = os.path.join(os.path.dirname(__file__), '..', '..', 'prompts', 'extract_blue_amounts_v2.txt')
+            logging.debug(f"Using default blue amount prompt: {prompt_path}")
 
-1.  **Identify Blue Text:** Locate all text elements that are rendered in a distinct blue color.
-2.  **Extract Text and Position:** For each blue text element found, extract its exact text content and estimate its bounding box `[x0, y0, x1, y1]`. Coordinates should be based on the image dimensions (origin top-left).
-
-**Output Format:**
-Output ONLY a single JSON list of objects. Each object in the list should represent one piece of blue text and contain:
-*   `amount`: The extracted text content (string).
-*   `position`: A list of four numbers representing the estimated bounding box `[x0, y0, x1, y1]`.
-
-Example JSON Output:
-```json
-[
-  {{"amount": "1,234,567", "position": [450.5, 100.2, 510.8, 112.0]}},
-  {{"amount": "(987)", "position": [451.0, 120.5, 505.0, 132.8]}}
-]
-```
-If no blue text is found, output an empty list `[]`.
-"""
+        try:
+            with open(prompt_path, 'r', encoding='utf-8') as f:
+                human_prompt_text = f.read()
+            # This prompt is static, no .format() needed currently
+        except FileNotFoundError:
+            logging.error(f"Blue amount prompt template file not found at: {prompt_path}")
+            return [] # Cannot proceed
+        except Exception as e:
+            logging.error(f"Error loading blue amount prompt from {prompt_path}: {e}")
+            return []
 
         # 3. Initialize and Call LLM
         if not settings.gemini_api_key:
@@ -917,7 +947,7 @@ If no blue text is found, output an empty list `[]`.
              return []
 
         llm = ChatGoogleGenerativeAI(model=model_name, google_api_key=settings.gemini_api_key, temperature=0.1)
-        logging.info(f"Page {page.page_number + 1}: Calling multimodal LLM ({model_name}) for blue amount extraction fallback...")
+        logging.info(f"Page {page.page_number}: Calling multimodal LLM ({model_name}) for blue amount extraction fallback...")
 
         message = HumanMessage(
             content=[
@@ -927,7 +957,7 @@ If no blue text is found, output an empty list `[]`.
         )
         response = llm.invoke([SystemMessage(content=system_prompt), message])
         response_content = response.content
-        logging.debug(f"LLM Blue Amount Response received (page {page.page_number + 1}): {response_content[:500]}...")
+        logging.debug(f"LLM Blue Amount Response received (page {page.page_number}): {response_content[:500]}...")
 
         # 4. Parse and Filter Response
         parsed_data = None
@@ -938,15 +968,15 @@ If no blue text is found, output an empty list `[]`.
                 json_string = json_match.group(1).strip()
                 if json_string:
                     try: parsed_data = json.loads(json_string)
-                    except json.JSONDecodeError as e: logging.error(f"Page {page.page_number + 1}: Failed to parse extracted JSON blue amount list: {e}\nString: {json_string}")
-                else: logging.warning(f"Page {page.page_number + 1}: Regex matched JSON block for blue amounts, but captured string was empty.")
+                    except json.JSONDecodeError as e: logging.error(f"Page {page.page_number}: Failed to parse extracted JSON blue amount list: {e}\nString: {json_string}")
+                else: logging.warning(f"Page {page.page_number}: Regex matched JSON block for blue amounts, but captured string was empty.")
             else:
-                logging.warning(f"Page {page.page_number + 1}: Could not find JSON list block ```json...``` in blue amount response. Attempting to parse entire response.")
+                logging.warning(f"Page {page.page_number}: Could not find JSON list block ```json...``` in blue amount response. Attempting to parse entire response.")
                 cleaned_response = response_content.strip()
                 if cleaned_response:
                     try: parsed_data = json.loads(cleaned_response)
-                    except json.JSONDecodeError as e: logging.error(f"Page {page.page_number + 1}: Failed to parse entire LLM blue amount response as JSON: {e}\nResponse: {response_content}")
-                else: logging.warning(f"Page {page.page_number + 1}: LLM blue amount response was empty after stripping whitespace.")
+                    except json.JSONDecodeError as e: logging.error(f"Page {page.page_number}: Failed to parse entire LLM blue amount response as JSON: {e}\nResponse: {response_content}")
+                else: logging.warning(f"Page {page.page_number}: LLM blue amount response was empty after stripping whitespace.")
 
             # Validate and filter
             if isinstance(parsed_data, list):
@@ -985,15 +1015,15 @@ If no blue text is found, output an empty list `[]`.
                         extracted_amounts.append({"amount": amount_text, "position": item['position']})
                     else:
                          logging.debug(f"Skipping non-numeric blue text from LLM: '{amount_text}'")
-                logging.info(f"Page {page.page_number + 1}: LLM fallback found {count_before_filter} blue elements, kept {len(extracted_amounts)} potential numeric amounts after filtering.")
+                logging.info(f"Page {page.page_number}: LLM fallback found {count_before_filter} blue elements, kept {len(extracted_amounts)} potential numeric amounts after filtering.")
             else:
-                logging.error(f"Page {page.page_number + 1}: Parsed LLM blue amount response was not a list. Parsed: {str(parsed_data)[:200]}...")
+                logging.error(f"Page {page.page_number}: Parsed LLM blue amount response was not a list. Parsed: {str(parsed_data)[:200]}...")
 
         except Exception as e:
-            logging.error(f"Page {page.page_number + 1}: Error processing LLM blue amount response content: {e}", exc_info=True)
+            logging.error(f"Page {page.page_number}: Error processing LLM blue amount response content: {e}", exc_info=True)
 
     except Exception as e:
-        logging.error(f"Page {page.page_number + 1}: Error during LLM blue amount extraction: {e}", exc_info=True)
+        logging.error(f"Page {page.page_number}: Error during LLM blue amount extraction: {e}", exc_info=True)
 
     return extracted_amounts
 
@@ -1002,7 +1032,9 @@ def parse_pdf_page_structure(
     pdf_path: str,
     page_num_one_indexed: int,
     amount_color_tuple: Tuple[float, float, float] = (0, 0, 0.5), # Example: Dark Blue
-    forced_amount_unit: Optional[str] = None, # New optional argument
+    forced_amount_unit: Optional[AmountUnit] = None, # Changed type hint back to Enum
+    prompt_template_path_override: Optional[str] = None, # Amount association prompt override
+    blue_amount_prompt_override: Optional[str] = None, # Add override for blue amount extraction prompt
     # Heuristic parameters are no longer used directly here but kept for reference
     vertical_tolerance: float = 2,
     horizontal_tolerance: float = 5,
@@ -1019,7 +1051,9 @@ def parse_pdf_page_structure(
         pdf_path: Path to the PDF file.
         page_num_one_indexed: The 1-based page number to parse.
         amount_color_tuple: Tuple representing the target RGB color for amount extraction.
-        forced_amount_unit: Optional amount unit string to override detection.
+        forced_amount_unit: Optional amount unit enum member to override detection.
+        prompt_template_path_override: Optional path to override the amount association prompt.
+        blue_amount_prompt_override: Optional path to override the blue amount extraction prompt.
         vertical_tolerance: Max vertical distance between word tops for same phrase.
         horizontal_tolerance: Max horizontal distance between words for same phrase.
         line_item_font_size_threshold: Font size below which a number is considered a line item.
@@ -1042,7 +1076,7 @@ def parse_pdf_page_structure(
                 return None
 
             page = pdf.pages[page_index]
-            logging.info(f"--- Processing Page {page.page_number + 1} ---")
+            logging.info(f"--- Processing Page {page_num_one_indexed} ---")
 
             # --- Extract elements NOT replaced by LLM --- 
             # (Amounts by color, potentially Amount Unit determination heuristically)
@@ -1052,14 +1086,16 @@ def parse_pdf_page_structure(
 
             # LLM Fallback for amounts if heuristic finds nothing
             if not amounts_heuristic:
-                logging.warning(f"Page {page.page_number + 1}: Heuristic amount extraction found nothing. Attempting LLM fallback to find blue text amounts...")
-                amounts_llm = extract_blue_amounts_llm(page)
-                if amounts_llm:
-                    amounts_to_associate = amounts_llm
+                logging.warning(f"Page {page_num_one_indexed}: Heuristic amount extraction found nothing. Attempting LLM fallback to find blue text amounts...")
+                # Pass the blue amount prompt override here
+                amounts_to_associate = extract_blue_amounts_llm(page, prompt_template_path_override=blue_amount_prompt_override)
+                if amounts_to_associate:
+                    amounts_to_associate = amounts_to_associate
+                    logging.info(f"Page {page_num_one_indexed}: LLM fallback found {len(amounts_to_associate)} potential blue amounts.")
                 else:
-                    logging.warning(f"Page {page.page_number + 1}: LLM fallback also found no blue text amounts.")
+                    logging.info(f"Page {page_num_one_indexed}: LLM fallback also found no blue amounts.")
             else:
-                logging.info(f"Page {page.page_number + 1}: Heuristic found {len(amounts_heuristic)} potential amounts.")
+                logging.info(f"Page {page_num_one_indexed}: Found {len(amounts_heuristic)} amounts via color heuristic.")
             
             # NOTE: Amount Unit determination MIGHT also be included in the structure LLM call
             #       or kept separate. Keeping separate for now.
@@ -1102,7 +1138,12 @@ def parse_pdf_page_structure(
             # The structure_data['line_items'] already has this format.
             # However, the amount associator might benefit from position info if available.
             # For now, just pass the essential info extracted by the structure LLM.
-            amount_map = associate_amounts_multimodal(page, llm_extracted_line_items, amounts_to_associate)
+            amount_map = associate_amounts_multimodal(
+                page, 
+                llm_extracted_line_items, 
+                amounts_to_associate, 
+                prompt_template_path_override=prompt_template_path_override # Pass override down
+            )
 
             # --- Build final output --- 
             # Use the line items extracted by the structure LLM
@@ -1118,18 +1159,19 @@ def parse_pdf_page_structure(
                             "amount": amount_map.get(line_num), # Get amount from the second LLM call
                         })
                     else:
-                         logging.warning(f"Page {page.page_number + 1}: Found invalid item in list from structure LLM: {line_data}")
+                         logging.warning(f"Page {page_num_one_indexed}: Found invalid item in list from structure LLM: {line_data}")
             else:
-                 logging.error(f"Page {page.page_number + 1}: line_items returned by structure LLM was not a list: {llm_extracted_line_items}")
+                 logging.error(f"Page {page_num_one_indexed}: line_items returned by structure LLM was not a list: {llm_extracted_line_items}")
 
 
             final_output = {
                 "form_title": form_title, # From structure LLM
                 "schedule_title": schedule_title, # From structure LLM
                 "amount_unit": amount_unit.value, # From forced value or heuristic
-                "line_items": output_line_items # From structure LLM + amount LLM
+                "line_items": output_line_items, # From structure LLM + amount LLM
+                "initial_amount_count": len(amounts_to_associate) # Add initial amount count
             }
-            logging.info(f"Successfully parsed structure for page {page.page_number + 1}.")
+            logging.info(f"Successfully parsed structure for page {page_num_one_indexed}.")
             return final_output
 
     except Exception as e:

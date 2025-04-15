@@ -158,8 +158,14 @@ parse-pdf-structure: ## Parse a specific PDF page structure
 parse-pdf-mcid: ## Analyze PDF MCIDs for a specific page
 	poetry run python scripts/analyze_pdf_mcid.py --pdf-path $(PDF_PATH) --page-num $(PAGE_NUM)
 
-parse-pdf-json: ## Parse a full PDF to JSON, validating pages
-	poetry run python scripts/parse_pdf_to_json.py --pdf-path $(PDF_PATH) --start-page $(START_PAGE)
+# Define AMOUNT_UNIT_ARG conditionally
+AMOUNT_UNIT_ARG = $(if $(AMOUNT_UNIT),--amount-unit $(AMOUNT_UNIT),)
+# Define START_PAGE_ARG conditionally
+START_PAGE_ARG = $(if $(START_PAGE),--start-page $(START_PAGE),)
+
+parse-pdf-json: ## Parse a full PDF to JSON, saving output adjacent to input PDF
+	@echo "Parsing PDF $(PDF_PATH) to JSON (adjacent to input) with start page '$(START_PAGE)' and amount unit '$(AMOUNT_UNIT)'..."
+	poetry run python scripts/parse_pdf_to_json.py --pdf-path $(PDF_PATH) $(START_PAGE_ARG) $(AMOUNT_UNIT_ARG)
 
 analyze-page-colors: ## Analyze and list colors found on a specific PDF page
 	poetry run python scripts/analyze_page_colors.py --pdf-path $(PDF_PATH) --page-num $(PAGE_NUM)

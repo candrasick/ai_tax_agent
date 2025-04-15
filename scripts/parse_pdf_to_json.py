@@ -15,12 +15,12 @@ if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
 try:
-    from ai_tax_agent.parsers.pdf_parser_utils import parse_full_pdf_structure
-except ImportError:
-    logging.error("Failed to import parse_full_pdf_structure. Ensure ai_tax_agent is installed or path is correct.")
+    from ai_tax_agent.parsers.pdf_parser_utils import parse_full_pdf_structure, AmountUnit
+except ImportError as e:
+    print(f"Error importing modules: {e}")
     sys.exit(1)
 
-# Configure logging
+# Configure basic logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 # Suppress noisy pdfminer warnings (like missing CropBox)
 logging.getLogger("pdfminer").setLevel(logging.ERROR)
@@ -36,22 +36,22 @@ def validate_page_data(page_data: dict) -> bool:
         logging.warning(f"Validation failed for an entry: Missing 'page_number'. Data: {str(page_data)[:100]}...")
         is_valid = False
         # Assign a placeholder if possible, though the function should add it
-        page_num = "UNKNOWN" 
-        
+        page_num = "UNKNOWN"
+
     # Check if at least one title is present and not empty/None
     if not (form_title or schedule_title):
         logging.warning(f"Validation failed for page {page_num}: Missing both 'form_title' and 'schedule_title'.")
         is_valid = False
-        
+
     return is_valid
 
 def main():
-    parser = argparse.ArgumentParser(description="Parse a PDF, validate pages, and output to JSON.")
+    parser = argparse.ArgumentParser(description="Parse a PDF, validate pages, and output to JSON in the same directory.")
     parser.add_argument("--pdf-path", required=True, help="Path to the input PDF file.")
     parser.add_argument("--start-page", type=int, default=1, help="Page number to start parsing from (1-based).")
-    parser.add_argument("--amount-unit", type=str, choices=["dollars", "forms", "individuals"], default=None, 
-                        help="Optionally specify the amount unit (dollars, forms, individuals) to override detection.")
-    
+    parser.add_argument("--amount-unit", type=lambda s: AmountUnit[s.upper()], choices=list(AmountUnit),
+                        help="Specify the unit for amounts (dollars, forms, individuals). Overrides detection.")
+
     args = parser.parse_args()
 
     pdf_path = args.pdf_path
@@ -64,9 +64,9 @@ def main():
 
     log_msg = f"Starting PDF parsing for '{pdf_path}' from page {start_page}"
     if forced_amount_unit:
-        log_msg += f" (forcing amount_unit='{forced_amount_unit}')"
+        log_msg += f" (forcing amount_unit='{forced_amount_unit.name}')"
     logging.info(log_msg + "...")
-    
+
     # Call the main parsing function from the utils module
     all_pages_data = parse_full_pdf_structure(
         pdf_path,
@@ -93,7 +93,7 @@ def main():
 
     logging.info(f"Validation complete. {valid_pages}/{len(all_pages_data)} pages passed basic validation (page_number and title presence).")
 
-    # Determine output path
+    # Determine output path: Same directory and basename as input PDF, but with .json extension
     pdf_dir = os.path.dirname(pdf_path)
     pdf_basename = os.path.basename(pdf_path)
     pdf_name_without_ext = os.path.splitext(pdf_basename)[0]

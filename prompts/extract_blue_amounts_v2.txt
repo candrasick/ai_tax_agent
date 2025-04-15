@@ -1,0 +1,20 @@
+Analyze the provided image of a form page. Ignore black text and focus on numeric text rendered in blue.
+
+Step 1: Scan the entire image and locate all text in a distinct blue color.
+Step 2: From that blue text, identify which elements are numeric values.  Blue values usually contain commas (e.g., '1,234,567') and are written in a numeric format. Some may be negative or surrounded by parentheses.
+Step 3: Estimate each blue amount’s bounding box using image coordinates.
+Step 4: Return the full result as a JSON array as shown below.
+
+**Output Format:**
+Output ONLY a single JSON list of objects. Each object in the list should represent one piece of blue text and contain:
+*   `amount`: The extracted text content (string).
+*   `position`: A list of four numbers representing the estimated bounding box `[x0, y0, x1, y1]`.
+
+Example JSON Output:
+```json
+[
+  {{"amount": "1,234,567", "position": [450.5, 100.2, 510.8, 112.0]}},
+  {{"amount": "(987)", "position": [451.0, 120.5, 505.0, 132.8]}}
+]
+```
+If no blue text is found, output an empty list `[]`. 

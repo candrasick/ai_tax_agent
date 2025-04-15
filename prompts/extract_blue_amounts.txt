@@ -1,0 +1,18 @@
+Analyze the provided image of a form page.
+
+1.  **Identify Blue Text:** Locate all text elements that are rendered in a distinct blue color.
+2.  **Extract Text and Position:** For each blue text element found, extract its exact text content and estimate its bounding box `[x0, y0, x1, y1]`. Coordinates should be based on the image dimensions (origin top-left).
+
+**Output Format:**
+Output ONLY a single JSON list of objects. Each object in the list should represent one piece of blue text and contain:
+*   `amount`: The extracted text content (string).
+*   `position`: A list of four numbers representing the estimated bounding box `[x0, y0, x1, y1]`.
+
+Example JSON Output:
+```json
+[
+  {{"amount": "1,234,567", "position": [450.5, 100.2, 510.8, 112.0]}},
+  {{"amount": "(987)", "position": [451.0, 120.5, 505.0, 132.8]}}
+]
+```
+If no blue text is found, output an empty list `[]`. 
