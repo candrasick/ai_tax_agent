@@ -23,15 +23,20 @@ class UsCodeSection(Base):
     section_title = Column(Text, nullable=True)
     full_text = Column(Text, nullable=True)
     amendments_text = Column(Text, nullable=True) # Added for separated amendment notes
-    core_text = Column(Text, nullable=True) # Added for core legal text without amendments
-    amendment_count = Column(Integer, default=0, nullable=False)
-    special_formatting = Column(Boolean, default=False, nullable=False)
+    core_text = Column(Text, nullable=True) # Added for main section text without amendments
+    amendment_count = Column(Integer, default=0, nullable=True)
+    special_formatting = Column(Boolean, default=False)
     updated_at = Column(Date, nullable=True)
     created_at = Column(TIMESTAMP, server_default=func.now(), nullable=False)
 
     # Add unique constraint for section_number
     __table_args__ = (UniqueConstraint('section_number', name='uq_section_number'),)
 
+    # Relationship to Form Fields (many-to-many through FormFieldUsCodeSectionLink)
+    field_links = relationship("FormFieldUsCodeSectionLink", back_populates="us_code_section", cascade="all, delete-orphan")
+    # Relationship to bulletin items (existing)
+    bulletin_item_associations = relationship("IrsBulletinItemToCodeSection", back_populates="us_code_section")
+    
     def __repr__(self):
         return f"<UsCodeSection(id={self.id}, section_number='{self.section_number}', title='{self.section_title}')>"
 
@@ -54,7 +59,7 @@ class IrsBulletin(Base):
     created_at = Column(TIMESTAMP, server_default=func.now(), nullable=False)
 
     # Relationship to items within this bulletin
-    items = relationship("IrsBulletinItem", back_populates="bulletin")
+    items = relationship("IrsBulletinItem", back_populates="bulletin", cascade="all, delete-orphan")
 
     def __repr__(self):
         return f"<IrsBulletin(id={self.id}, number='{self.bulletin_number}')>"
@@ -69,16 +74,15 @@ class IrsBulletinItem(Base):
     item_type = Column(Text, nullable=True) # 'Rev. Rul.', 'Rev. Proc.', 'Announcement', 'Notice', 'Disbarment', 'Other'
     item_number = Column(Text, nullable=False) # e.g., '2024-12'
     title = Column(Text, nullable=True)
-    action = Column(Text, nullable=True) # e.g., 'amplified', 'modified', 'revoked'
-    # description = Column(Text, nullable=True) # Removed
-    full_text = Column(Text, nullable=True) # Optional full content
-    referenced_sections = Column(Text, nullable=True) # Added for comma-delimited list of found section numbers
+    action = Column(Text, nullable=True) # Comma-separated actions like 'modified', 'superseded'
+    full_text = Column(Text, nullable=True) # Full text snippet for the item
+    referenced_sections = Column(Text, nullable=True) # Comma-separated list of section numbers found
     created_at = Column(TIMESTAMP, server_default=func.now(), nullable=False)
 
     # Relationship back to the parent bulletin
     bulletin = relationship("IrsBulletin", back_populates="items")
     # Relationship to linked code sections
-    code_section_associations = relationship("IrsBulletinItemToCodeSection", back_populates="bulletin_item")
+    code_section_associations = relationship("IrsBulletinItemToCodeSection", back_populates="bulletin_item", cascade="all, delete-orphan")
 
     def __repr__(self):
         return f"<IrsBulletinItem(id={self.id}, type='{self.item_type}', number='{self.item_number}')>"
@@ -90,7 +94,6 @@ class IrsBulletinItemToCodeSection(Base):
     id = Column(Integer, primary_key=True)
     bulletin_item_id = Column(Integer, ForeignKey('irs_bulletin_item.id'), nullable=False)
     section_id = Column(Integer, ForeignKey('us_code_section.id'), nullable=False)
-    # relevance_notes = Column(Text, nullable=True) # Removed
     created_at = Column(TIMESTAMP, server_default=func.now(), nullable=False)
 
     # Define composite unique constraint
@@ -98,7 +101,7 @@ class IrsBulletinItemToCodeSection(Base):
 
     # Relationships
     bulletin_item = relationship("IrsBulletinItem", back_populates="code_section_associations")
-    us_code_section = relationship("UsCodeSection") # No back_populates needed if UsCodeSection doesn't need to list these associations directly
+    us_code_section = relationship("UsCodeSection", back_populates="bulletin_item_associations")
 
     def __repr__(self):
         return f"<IrsBulletinItemToCodeSection(item_id={self.bulletin_item_id}, section_id={self.section_id})>"
@@ -134,4 +137,23 @@ class FormField(Base):
     instruction = relationship("FormInstruction", back_populates="fields")
     
     def __repr__(self):
-        return f"<FormField(field_label='{self.field_label}')>" 
+        return f"<FormField(field_label='{self.field_label}')>"
+
+# --- Association Object Model: FormField <-> UsCodeSection --- #
+class FormFieldUsCodeSectionLink(Base):
+    __tablename__ = 'form_field_us_code_section_link'
+    id = Column(Integer, primary_key=True) # Surrogate primary key
+    form_field_id = Column(Integer, ForeignKey('form_fields.id', ondelete='CASCADE'), nullable=False, index=True)
+    us_code_section_id = Column(Integer, ForeignKey('us_code_section.id', ondelete='CASCADE'), nullable=False, index=True)
+    rationale = Column(Text, nullable=False)
+    created_at = Column(TIMESTAMP, server_default=func.now(), nullable=False)
+    
+    # Add unique constraint to prevent duplicate links for the same pair
+    __table_args__ = (UniqueConstraint('form_field_id', 'us_code_section_id', name='uq_form_field_section_link'),)
+
+    # Relationships back to the parent tables
+    form_field = relationship("FormField", back_populates="section_links")
+    us_code_section = relationship("UsCodeSection", back_populates="field_links")
+
+    def __repr__(self):
+        return f"<FormFieldUsCodeSectionLink(form_field_id={self.form_field_id}, us_code_section_id={self.us_code_section_id})>" 
