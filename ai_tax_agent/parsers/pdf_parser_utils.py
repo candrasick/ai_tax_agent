@@ -278,6 +278,20 @@ def determine_amount_unit(all_text_phrases: List[Dict[str, Any]]) -> AmountUnit:
     Returns:
         An AmountUnit enum member indicating the determined unit type.
     """
+    # --- Priority Checks for Specific Phrases --- 
+    # Combine text preserving original case for these checks
+    full_text_original_case = " ".join([p.get('text', '') for p in all_text_phrases])
+
+    if "Frequency Counts (in Whole Numbers)" in full_text_original_case:
+        logging.debug("Found exact phrase 'Frequency Counts (in Whole Numbers)'. Unit: FORMS")
+        return AmountUnit.FORMS
+    if "Amounts (in Thousands)" in full_text_original_case:
+        logging.debug("Found exact phrase 'Amounts (in Thousands)'. Unit: DOLLARS")
+        return AmountUnit.DOLLARS
+
+    # --- Fallback to Keyword and Pattern Matching --- 
+    logging.debug("Did not find priority phrases, falling back to keyword/pattern matching...")
+
     # Define patterns for case-insensitive matching
     individuals_pattern = re.compile(r"Number\s+of\s+individuals", re.IGNORECASE)
     dollars_pattern = re.compile(r"Amount\s+of\s+selected\s+lines", re.IGNORECASE)
