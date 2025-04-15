@@ -174,5 +174,4 @@ cython_debug/
 .pypirc
 
 # SQLite database file (Project Specific)
-tax_data.db
 *.db-journal
