@@ -1,7 +1,8 @@
 from sqlalchemy.orm import declarative_base
 from sqlalchemy import (Column, Integer, String, Text, Boolean, 
-                        Date, TIMESTAMP, ForeignKey, func, UniqueConstraint, Numeric)
+                        Date, TIMESTAMP, ForeignKey, func, UniqueConstraint, Numeric, Float)
 from sqlalchemy.orm import relationship
+from typing import Optional
 
 # Base class for all ORM models
 Base = declarative_base()
@@ -37,8 +38,20 @@ class UsCodeSection(Base):
     # Relationship to bulletin items (existing)
     bulletin_item_associations = relationship("IrsBulletinItemToCodeSection", back_populates="us_code_section")
     
+    # Example relationship (if you have a link table)
+    # linked_form_fields = relationship("FormField", secondary="form_field_us_code_section_link", back_populates="linked_us_code_sections")
+
+    # --- New Z-Score Fields --- #
+    amendment_count_z: Optional[float] = Column(Float, nullable=True, comment="Z-score for amendment count relative to average.")
+    bulletins_count_z: Optional[float] = Column(Float, nullable=True, comment="Z-score for IRS bulletin mentions relative to average.")
+    section_count_z: Optional[float] = Column(Float, nullable=True, comment="Z-score for section text length relative to average.")
+    # -------------------------- #
+
+    # Relationship to complexity assessment (one-to-one)
+    complexity_assessment = relationship("SectionComplexity", back_populates="us_code_section", uselist=False, cascade="all, delete-orphan")
+
     def __repr__(self):
-        return f"<UsCodeSection(id={self.id}, section_number='{self.section_number}', title='{self.section_title}')>"
+        return f"<UsCodeSection(id={self.id}, title={self.title_number}, section={self.section_number} - '{self.section_title}')>"
 
 # Example model (can be removed later):
 # from sqlalchemy import Column, Integer, String
@@ -182,4 +195,25 @@ class FormFieldUsCodeSectionLink(Base):
     us_code_section = relationship("UsCodeSection", back_populates="field_links")
 
     def __repr__(self):
-        return f"<FormFieldUsCodeSectionLink(form_field_id={self.form_field_id}, us_code_section_id={self.us_code_section_id})>" 
+        return f"<FormFieldUsCodeSectionLink(form_field_id={self.form_field_id}, us_code_section_id={self.us_code_section_id})>"
+
+# --- New SectionComplexity Model --- #
+class SectionComplexity(Base):
+    __tablename__ = 'section_complexity'
+
+    id = Column(Integer, primary_key=True)
+    section_id = Column(Integer, ForeignKey('us_code_section.id', ondelete='CASCADE'), nullable=False, unique=True, index=True)
+    # unique=True enforces a one-to-one relationship with UsCodeSection
+    
+    complexity_score = Column(Float, nullable=True) # Score can be calculated later
+    rationale = Column(Text, nullable=True) # Explanation for the score
+    
+    created_at = Column(TIMESTAMP, server_default=func.now(), nullable=False)
+    updated_at = Column(TIMESTAMP, server_default=func.now(), onupdate=func.now(), nullable=False)
+
+    # Relationship back to UsCodeSection (one-to-one)
+    us_code_section = relationship("UsCodeSection", back_populates="complexity_assessment")
+
+    def __repr__(self):
+        score_str = f"{self.complexity_score:.2f}" if self.complexity_score is not None else "None"
+        return f"<SectionComplexity(section_id={self.section_id}, score={score_str})>" 
