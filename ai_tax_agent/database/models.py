@@ -3,6 +3,7 @@ from sqlalchemy import (Column, Integer, String, Text, Boolean,
                         Date, TIMESTAMP, ForeignKey, func, UniqueConstraint, Numeric, Float)
 from sqlalchemy.orm import relationship
 from typing import Optional
+from sqlalchemy.orm import Mapped, mapped_column # Use modern Mapped/mapped_column if consistent with rest of file
 
 # Base class for all ORM models
 Base = declarative_base()
@@ -49,6 +50,12 @@ class UsCodeSection(Base):
 
     # Relationship to complexity assessment (one-to-one)
     complexity_assessment = relationship("SectionComplexity", back_populates="us_code_section", uselist=False, cascade="all, delete-orphan")
+
+    # Relationship to exemptions (one-to-many)
+    exemptions = relationship("Exemption", back_populates="us_code_section", cascade="all, delete-orphan")
+    
+    # Relationship to impact assessment (one-to-one)
+    impact_assessment = relationship("SectionImpact", back_populates="us_code_section", uselist=False, cascade="all, delete-orphan")
 
     def __repr__(self):
         return f"<UsCodeSection(id={self.id}, title={self.title_number}, section={self.section_number} - '{self.section_title}')>"
@@ -217,3 +224,47 @@ class SectionComplexity(Base):
     def __repr__(self):
         score_str = f"{self.complexity_score:.2f}" if self.complexity_score is not None else "None"
         return f"<SectionComplexity(section_id={self.section_id}, score={score_str})>" 
+
+# --- New Exemption Model --- #
+class Exemption(Base):
+    __tablename__ = 'exemptions'
+
+    id = Column(Integer, primary_key=True)
+    section_id = Column(Integer, ForeignKey('us_code_section.id', ondelete='CASCADE'), nullable=False, index=True)
+    
+    revenue_impact_estimate = Column(Numeric, nullable=True, comment="Estimated revenue impact in thousands of dollars.")
+    entity_impact = Column(Numeric, nullable=True, comment="Estimated total number of entities (people, companies, etc.) impacted.")
+    rationale = Column(Text, nullable=True, comment="Explanation for why this is considered an exemption and its impact.")
+    relevant_text = Column(Text, nullable=True, comment="Specific text snippet from the section identified as the exemption.")
+    
+    created_at = Column(TIMESTAMP, server_default=func.now(), nullable=False)
+    # Use updated_at for consistency if that's the name used elsewhere, else modified_at
+    updated_at = Column(TIMESTAMP, server_default=func.now(), onupdate=func.now(), nullable=False) 
+
+    # Relationship back to UsCodeSection (many exemptions can belong to one section)
+    us_code_section = relationship("UsCodeSection", back_populates="exemptions")
+
+    def __repr__(self):
+        impact_str = f"{self.revenue_impact_estimate}k" if self.revenue_impact_estimate is not None else "None"
+        return f"<Exemption(section_id={self.section_id}, impact={impact_str})>" 
+
+# --- New SectionImpact Model --- #
+class SectionImpact(Base):
+    __tablename__ = 'section_impact'
+
+    id = Column(Integer, primary_key=True)
+    section_id = Column(Integer, ForeignKey('us_code_section.id', ondelete='CASCADE'), nullable=False, unique=True, index=True)
+    # unique=True enforces a one-to-one relationship with UsCodeSection
+    
+    revenue_impact = Column(Numeric, nullable=True, comment="Estimated overall revenue impact (positive or negative). Units may vary.")
+    entity_impact = Column(Numeric, nullable=True, comment="Estimated total number of entities (people, companies, etc.) significantly impacted.")
+    rationale = Column(Text, nullable=True, comment="Explanation for the impact estimates.")
+    
+    created_at = Column(TIMESTAMP, server_default=func.now(), nullable=False)
+    updated_at = Column(TIMESTAMP, server_default=func.now(), onupdate=func.now(), nullable=False)
+
+    # Relationship back to UsCodeSection (one-to-one)
+    us_code_section = relationship("UsCodeSection", back_populates="impact_assessment")
+
+    def __repr__(self):
+        return f"<SectionImpact(section_id={self.section_id})>" 
