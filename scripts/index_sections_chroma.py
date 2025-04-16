@@ -32,7 +32,8 @@ from ai_tax_agent.database.models import UsCodeSection
 from ai_tax_agent.database.session import get_session
 
 # --- Constants & Config --- #
-DEFAULT_CHROMA_PATH = "./chroma_db"
+# Standardize the path to match other scripts
+DEFAULT_CHROMA_PATH = "chroma_data"
 DEFAULT_COLLECTION_NAME = "us_code_sections"
 DEFAULT_EMBEDDING_MODEL = "text-embedding-004" # Google's latest embedding model
 DEFAULT_BATCH_SIZE = 100
