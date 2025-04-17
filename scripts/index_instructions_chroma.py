@@ -6,10 +6,8 @@ import time # Import time module
 from typing import List, Sequence
 
 import chromadb
-# Import only the necessary type from ChromaDB
-from chromadb.api.types import EmbeddingFunction
-# Import LangChain's Google embedding class
-from langchain_google_genai import GoogleGenerativeAIEmbeddings
+# Removed: from chromadb.api.types import EmbeddingFunction
+# Removed: from langchain_google_genai import GoogleGenerativeAIEmbeddings
 # Import the specific exception for rate limiting
 from langchain_google_genai._common import GoogleGenerativeAIError
 from sqlalchemy.orm import Session, joinedload
@@ -22,23 +20,14 @@ sys.path.insert(0, project_root)
 from ai_tax_agent.settings import settings
 from ai_tax_agent.database.session import get_session
 from ai_tax_agent.database.models import FormInstruction, FormField
-# Remove import for non-existent module
-# from ai_tax_agent.log_config import setup_logging
-# from ai_tax_agent.text_utils import chunk_by_html_headings, extract_main_content
+# Import the shared function
+from ai_tax_agent.llm_utils import get_embedding_function
 
 logger = logging.getLogger(__name__)
 
-# --- Embedding Function Wrapper --- #
-
-class LangchainEmbeddingFunctionWrapper(EmbeddingFunction):
-    """Wraps a LangChain embedding function to ensure ChromaDB compatibility."""
-    def __init__(self, langhain_embedder: GoogleGenerativeAIEmbeddings):
-        self._langchain_embedder = langhain_embedder
-
-    def __call__(self, input: List[str]) -> List[List[float]]:
-        """Embeds the input texts using the wrapped LangChain embedder."""
-        # Langchain embedders usually have embed_documents method for batches
-        return self._langchain_embedder.embed_documents(input)
+# --- Removed Embedding Function Wrapper --- #
+# class LangchainEmbeddingFunctionWrapper(EmbeddingFunction):
+#     ... (wrapper code removed)
 
 # --- Constants ---
 COLLECTION_NAME = "form_instructions"
@@ -56,16 +45,9 @@ def get_chroma_client() -> chromadb.Client:
     """Initializes and returns a persistent ChromaDB client."""
     return chromadb.PersistentClient(path=CHROMA_DATA_PATH)
 
-def get_embedding_function(settings):
-    """Initializes and returns the Langchain embedding function instance."""
-    if not settings.gemini_api_key:
-        raise ValueError("GEMINI_API_KEY environment variable not set.")
-    # Return the LangChain instance, not the wrapper here
-    return GoogleGenerativeAIEmbeddings(
-        model="models/text-embedding-004", # Ensure this is the desired model, prepended with models/
-        google_api_key=settings.gemini_api_key,
-        task_type="retrieval_document"
-    )
+# --- Removed local get_embedding_function --- #
+# def get_embedding_function(settings):
+#     ... (function code removed)
 
 def get_form_fields_to_index(session: Session) -> Sequence[FormField]:
     """Fetches all FormField records with non-empty full_text, joining FormInstruction."""
@@ -98,12 +80,14 @@ def main():
     logger.info("Initializing ChromaDB client and embedding function...")
     try:
         chroma_client = get_chroma_client()
-        # Get the LangChain embedder instance
-        lc_embed_fn_instance = get_embedding_function(settings)
-        # Wrap it for ChromaDB compatibility
-        chroma_compatible_embed_fn = LangchainEmbeddingFunctionWrapper(lc_embed_fn_instance)
+        # Get the LangChain embedder instance directly from llm_utils
+        embedding_function_instance = get_embedding_function()
+        if not embedding_function_instance:
+             logger.error("Failed to initialize embedding function. Exiting.")
+             sys.exit(1)
+        # Removed wrapper creation
     except Exception as e:
-        logger.error(f"Failed to initialize ChromaDB or embedding function: {e}")
+        logger.error(f"Failed to initialize ChromaDB or embedding function: {e}", exc_info=True) # Added exc_info
         sys.exit(1)
 
     if args.clear:
@@ -117,12 +101,12 @@ def main():
     try:
         collection = chroma_client.get_or_create_collection(
             name=COLLECTION_NAME,
-            # Pass the wrapper instance to ChromaDB
-            embedding_function=chroma_compatible_embed_fn, 
+            # Pass the LangChain instance directly
+            embedding_function=embedding_function_instance,
             metadata={"hnsw:space": "cosine"} # Example metadata: Use cosine distance
         )
     except Exception as e:
-        logger.error(f"Failed to get or create ChromaDB collection: {e}")
+        logger.error(f"Failed to get or create ChromaDB collection: {e}", exc_info=True) # Added exc_info
         sys.exit(1)
 
     logger.info("Getting database session...")
@@ -150,15 +134,14 @@ def main():
     batch_documents = []
     batch_metadatas = []
     total_chunks_processed = 0
+    upserted_count = 0 # Track successful upserts
 
     for form_field in tqdm(form_fields_to_index, desc="Indexing Form Fields"):
         if not form_field.full_text:
             logger.warning(f"Skipping form field ID {form_field.id} - no full_text")
             continue
 
-        # We are indexing each FormField.full_text as a single document
         document = form_field.full_text
-        # Ensure instruction data is loaded (should be due to joinedload)
         if not form_field.instruction:
              logger.warning(f"Skipping form field ID {form_field.id} because related instruction data is missing.")
              continue
@@ -166,150 +149,121 @@ def main():
         doc_id = f"field_{form_field.id}"
         metadata = {
             "field_id": form_field.id,
-            "field_label": form_field.field_label,
-            "form_number": form_field.instruction.form_number,
-            "form_title": form_field.instruction.title,
+            "field_label": form_field.field_label or "", # Ensure not None
+            "form_number": form_field.instruction.form_number or "", # Ensure not None
+            "form_title": form_field.instruction.title or "", # Ensure not None
             "text_length": len(document)
-            # Add instruction_id if needed: "instruction_id": form_field.instruction_id
         }
+
+        # Simple validation for ChromaDB compatibility
+        for k, v in metadata.items():
+            if not isinstance(v, (str, int, float, bool)):
+                logger.warning(f"Metadata key '{k}' has incompatible type '{type(v)}' for doc_id {doc_id}. Converting to string.")
+                metadata[k] = str(v)
 
         batch_ids.append(doc_id)
         batch_documents.append(document)
         batch_metadatas.append(metadata)
-        total_chunks_processed += 1 # Counting fields processed
+        total_chunks_processed += 1
 
-        # Upsert batch if size limit reached
         if len(batch_ids) >= args.batch_size:
-            # Check which IDs already exist
-            ids_to_actually_upsert = []
-            documents_to_actually_upsert = []
-            metadatas_to_actually_upsert = []
+            # Pre-check existing IDs
             try:
                 existing_data = collection.get(ids=batch_ids)
                 existing_ids = set(existing_data['ids'])
                 new_indices = [idx for idx, batch_id in enumerate(batch_ids) if batch_id not in existing_ids]
-                
+
                 if new_indices:
-                    ids_to_actually_upsert = [batch_ids[i] for i in new_indices]
-                    documents_to_actually_upsert = [batch_documents[i] for i in new_indices]
-                    metadatas_to_actually_upsert = [batch_metadatas[i] for i in new_indices]
-                    logger.debug(f"Batch check: Found {len(batch_ids) - len(ids_to_actually_upsert)} existing IDs. Preparing to upsert {len(ids_to_actually_upsert)} new chunks.")
+                    ids_to_upsert = [batch_ids[i] for i in new_indices]
+                    docs_to_upsert = [batch_documents[i] for i in new_indices]
+                    meta_to_upsert = [batch_metadatas[i] for i in new_indices]
+                    logger.debug(f"Batch check: Found {len(existing_ids)} existing chunks. Preparing to upsert {len(ids_to_upsert)} new chunks.")
+
+                    # Upsert logic with retries
+                    retries = 0
+                    max_retries = 3
+                    while retries < max_retries:
+                        try:
+                            collection.upsert(ids=ids_to_upsert, documents=docs_to_upsert, metadatas=meta_to_upsert)
+                            upserted_count += len(ids_to_upsert)
+                            logger.debug(f"Upserted batch of {len(ids_to_upsert)} chunks successfully.")
+                            time.sleep(1) # Small delay after success
+                            break
+                        except GoogleGenerativeAIError as e:
+                             if "Quota exceeded" in str(e) or "429" in str(e):
+                                retries += 1
+                                wait_time = 60 * retries # Exponential backoff
+                                logger.warning(f"Rate limit hit. Attempt {retries}/{max_retries}. Waiting {wait_time}s...")
+                                time.sleep(wait_time)
+                             else:
+                                logger.error(f"Non-rate-limit Google API error during upsert: {e}", exc_info=True)
+                                break # Stop retrying for other Google errors
+                        except Exception as e:
+                            logger.error(f"Unexpected error upserting batch to ChromaDB: {e}", exc_info=True)
+                            break # Stop retrying for other errors
+
+                    if retries == max_retries:
+                         logger.error(f"Max retries reached for batch ending with ID {ids_to_upsert[-1]}. Skipping this batch.")
                 else:
-                     logger.debug(f"Batch check: All {len(batch_ids)} potential chunks already exist in ChromaDB. Skipping upsert for this batch.")
+                    logger.debug(f"Batch check: All {len(batch_ids)} chunks already exist. Skipping upsert.")
 
             except Exception as e:
-                logger.error(f"Error checking existing IDs in ChromaDB for instruction batch: {e}", exc_info=True)
-                logger.warning("Skipping current batch due to error checking existing IDs.")
-                # Clear potentially inconsistent batch data before continuing
-                batch_ids.clear()
-                batch_documents.clear()
-                batch_metadatas.clear()
-                continue
+                logger.error(f"Error checking/upserting batch: {e}", exc_info=True)
+                logger.warning("Skipping current batch due to error.")
 
-            # Only upsert if there are genuinely new chunks
-            if ids_to_actually_upsert:
-                retries = 0
-                max_retries = 3 # Limit retries
-                while retries < max_retries:
-                    try:
-                        logger.debug(f"Upserting batch of {len(ids_to_actually_upsert)} chunks...")
-                        collection.upsert(
-                            ids=ids_to_actually_upsert,
-                            documents=documents_to_actually_upsert,
-                            metadatas=metadatas_to_actually_upsert
-                        )
-                        logger.debug(f"Upserted batch successfully.")
-                        
-                        # Add short delay after successful upsert
-                        time.sleep(1)
-                        break # Success, exit retry loop
-                        
-                    except GoogleGenerativeAIError as e:
-                        if "Quota exceeded" in str(e) or "429" in str(e):
-                            retries += 1
-                            wait_time = 90
-                            logger.warning(
-                                f"Rate limit hit on instruction batch. Attempt {retries}/{max_retries}. "
-                                f"Waiting {wait_time}s before retry..."
-                            )
-                            time.sleep(wait_time)
-                        else:
-                            logger.error(f"Non-rate-limit Google API error during upsert: {e}", exc_info=True)
-                            break # Exit retry loop on other Google errors
-                            
-                    except Exception as e:
-                        logger.error(f"Unexpected error upserting filtered batch to ChromaDB: {e}")
-                        break # Exit retry loop on other non-Google errors
-
-                if retries == max_retries:
-                     logger.error(f"Max retries reached for instruction batch ending with ID {ids_to_actually_upsert[-1] if ids_to_actually_upsert else 'N/A'}. Skipping this batch.")
-            
-            # Clear original batches regardless of whether upsert happened or failed
+            # Clear batch lists after processing
             batch_ids.clear()
             batch_documents.clear()
             batch_metadatas.clear()
 
-    # Upsert any remaining chunks in the last batch (with pre-check)
-    if batch_ids: 
-        ids_to_actually_upsert = []
-        documents_to_actually_upsert = []
-        metadatas_to_actually_upsert = []
+    # Upsert final batch (with pre-check)
+    if batch_ids:
         try:
             existing_data = collection.get(ids=batch_ids)
             existing_ids = set(existing_data['ids'])
             new_indices = [idx for idx, batch_id in enumerate(batch_ids) if batch_id not in existing_ids]
-                    
+
             if new_indices:
-                ids_to_actually_upsert = [batch_ids[i] for i in new_indices]
-                documents_to_actually_upsert = [batch_documents[i] for i in new_indices]
-                metadatas_to_actually_upsert = [batch_metadatas[i] for i in new_indices]
-                logger.debug(f"Final Batch check: Found {len(batch_ids) - len(ids_to_actually_upsert)} existing IDs. Preparing to upsert {len(ids_to_actually_upsert)} new chunks.")
+                ids_to_upsert = [batch_ids[i] for i in new_indices]
+                docs_to_upsert = [batch_documents[i] for i in new_indices]
+                meta_to_upsert = [batch_metadatas[i] for i in new_indices]
+                logger.info(f"Final Batch check: Found {len(existing_ids)} existing chunks. Preparing to upsert {len(ids_to_upsert)} new chunks.")
+
+                # Upsert logic with retries for final batch
+                retries = 0
+                max_retries = 3
+                while retries < max_retries:
+                    try:
+                        collection.upsert(ids=ids_to_upsert, documents=docs_to_upsert, metadatas=meta_to_upsert)
+                        upserted_count += len(ids_to_upsert)
+                        logger.info(f"Upserted final batch of {len(ids_to_upsert)} chunks successfully.")
+                        break
+                    except GoogleGenerativeAIError as e:
+                        if "Quota exceeded" in str(e) or "429" in str(e):
+                            retries += 1
+                            wait_time = 60 * retries
+                            logger.warning(f"Rate limit hit on final batch. Attempt {retries}/{max_retries}. Waiting {wait_time}s...")
+                            time.sleep(wait_time)
+                        else:
+                            logger.error(f"Non-rate-limit Google API error during final upsert: {e}", exc_info=True)
+                            break
+                    except Exception as e:
+                        logger.error(f"Unexpected error upserting final batch: {e}", exc_info=True)
+                        break
+                if retries == max_retries:
+                     logger.error("Max retries reached for final batch. Failed to upsert remaining chunks.")
             else:
-                logger.debug(f"Final Batch check: All {len(batch_ids)} potential chunks already exist in ChromaDB. Skipping final upsert.")
+                logger.info(f"Final Batch check: All {len(batch_ids)} chunks already exist. Skipping final upsert.")
+
         except Exception as e:
-            logger.error(f"Error checking existing IDs in ChromaDB for final instruction batch: {e}", exc_info=True)
-            logger.warning("Skipping final batch due to error checking existing IDs.")
-            # Clear remaining batch data
-            batch_ids.clear()
-            batch_documents.clear()
-            batch_metadatas.clear()
+            logger.error(f"Error checking/upserting final batch: {e}", exc_info=True)
 
-        # Only upsert if there are genuinely new chunks in the final batch
-        if ids_to_actually_upsert:
-            retries = 0
-            max_retries = 3
-            while retries < max_retries:
-                try:
-                    logger.info(f"Upserting final filtered batch of {len(ids_to_actually_upsert)} chunks...")
-                    collection.upsert(
-                        ids=ids_to_actually_upsert,
-                        documents=documents_to_actually_upsert,
-                        metadatas=metadatas_to_actually_upsert
-                    )
-                    logger.info(f"Upserted final batch successfully.")
-                    break # Success
-                    
-                except GoogleGenerativeAIError as e:
-                    if "Quota exceeded" in str(e) or "429" in str(e):
-                        retries += 1
-                        wait_time = 90
-                        logger.warning(
-                            f"Rate limit hit on final instruction batch. Attempt {retries}/{max_retries}. "
-                            f"Waiting {wait_time}s before retry..."
-                        )
-                        time.sleep(wait_time)
-                    else:
-                        logger.error(f"Non-rate-limit Google API error during final upsert: {e}", exc_info=True)
-                        break # Exit retry loop on other Google errors
-                        
-                except Exception as e:
-                    logger.error(f"Error upserting final filtered batch to ChromaDB: {e}")
-                    break # Exit retry loop on other non-Google errors
-            
-            if retries == max_retries:
-                 logger.error("Max retries reached for final instruction batch. Failed to upsert remaining chunks.")
-
-    logger.info(f"Indexing complete. Processed {len(form_fields_to_index)} form fields. Upserted {total_chunks_processed} documents to ChromaDB.")
+    logger.info(f"--- Indexing Complete ---")
+    logger.info(f"Total form fields processed: {len(form_fields_to_index)}")
+    # total_chunks_processed represents the number of fields we attempted to process
+    logger.info(f"Total documents prepared for potential upsert: {total_chunks_processed}")
+    logger.info(f"Total documents successfully upserted (new or updated): {upserted_count}")
+    logger.info(f"Collection '{COLLECTION_NAME}' count: {collection.count()}")
     db.close()
 
 if __name__ == "__main__":
