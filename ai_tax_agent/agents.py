@@ -12,6 +12,7 @@ from langchain_core.language_models.chat_models import BaseChatModel
 from ai_tax_agent.settings import settings
 from ai_tax_agent.llm_utils import get_gemini_llm
 from ai_tax_agent.tools.db_tools import get_section_details_and_stats
+from ai_tax_agent.tools.chroma_tools import query_cbo_projections, query_form_instructions
 
 logger = logging.getLogger(__name__)
 
@@ -22,11 +23,6 @@ def db_query_placeholder(query: str) -> str:
     """Placeholder for querying the relational database."""
     logger.info(f"DB Placeholder received query: {query}")
     return "Placeholder: Database query results for '{query}'. Replace with actual DB query tool."
-
-def chroma_query_placeholder(query: str) -> str:
-    """Placeholder for querying the ChromaDB vector store."""
-    logger.info(f"Chroma Placeholder received query: {query}")
-    return "Placeholder: ChromaDB similarity search results for '{query}'. Replace with actual ChromaDB retriever tool."
 
 # --- Agent Creation ---
 
@@ -96,24 +92,25 @@ def create_tax_analysis_agent(
     )
     logger.info("'Get Section Details and Statistics' database tool initialized.")
 
-    # (Optional) Keep a more general placeholder if needed for queries not covered by get_section_details_and_stats yet
-    # tools.append(
-    #     Tool(
-    #         name="General Database Query Placeholder",
-    #         func=db_query_placeholder,
-    #         description="Placeholder for other types of database queries not covered by specific tools.",
-    #     )
-    # )
-
-    # ChromaDB Placeholder Tool
+    # Query CBO Projections Tool
     tools.append(
-        Tool(
-            name="Semantic Search Instructions",
-            func=chroma_query_placeholder,
-            description="Performs semantic similarity search on tax form instructions or section text. Useful for finding related content when direct links are missing. Use queries like 'find instructions similar to text about capital gains exemption'.",
+        Tool.from_function(
+            func=query_cbo_projections,
+            name="Query CBO Revenue Projections",
+            description="Performs semantic similarity search on the CBO Revenue Projections data. Useful for finding relevant CBO projection details based on a textual query like 'projected corporate income tax 2026' or 'individual income tax trends'.",
         )
     )
-    logger.info("ChromaDB placeholder tool initialized.")
+    logger.info("'Query CBO Revenue Projections' ChromaDB tool initialized.")
+
+    # Query Form Instructions Tool
+    tools.append(
+        Tool.from_function(
+            func=query_form_instructions,
+            name="Query Form Instructions",
+            description="Performs semantic similarity search on indexed form field instructions/text. Useful for finding relevant form field details or instructions when direct links via section number are missing or insufficient. Use queries like 'find instructions about deducting business meals' or 'search form text for capital gains reporting'.",
+        )
+    )
+    logger.info("'Query Form Instructions' ChromaDB tool initialized.")
 
     if not tools:
         logger.error("No tools could be initialized. Cannot create agent.")
@@ -158,20 +155,28 @@ if __name__ == '__main__':
     tax_agent_executor = create_tax_analysis_agent(verbose=True)
 
     if tax_agent_executor:
-        logger.info("Agent created successfully. Testing with a simple query...")
+        logger.info("Agent created successfully. Testing tools...")
         try:
-            # Note: Placeholders will respond, not real tools yet.
-            response = tax_agent_executor.invoke({"input": "What is the sum of 5 and 12?"})
-            logger.info(f"Agent Response: {response}")
+            # Test calculator
+            response = tax_agent_executor.invoke({"input": "What is 7% of $550,000?"})
+            logger.info(f"\n--- Calculator Response ---\n{response}\n")
 
+            # Test DB tool
             response = tax_agent_executor.invoke({"input": "Get details and statistics for section 162"})
-            logger.info(f"Agent Response: {response}")
+            logger.info(f"\n--- DB Tool Response ---\n{response}\n")
 
-            response = tax_agent_executor.invoke({"input": "Search web for latest US inflation rate"})
-            logger.info(f"Agent Response: {response}")
+            # Test web search
+            response = tax_agent_executor.invoke({"input": "Search web for current US unemployment rate"})
+            logger.info(f"\n--- Web Search Response ---\n{response}\n")
 
-            response = tax_agent_executor.invoke({"input": "Find instructions similar to depreciation rules"})
-            logger.info(f"Agent Response: {response}")
+            # Test Chroma CBO tool
+            response = tax_agent_executor.invoke({"input": "Query CBO projections for payroll taxes in 2025"})
+            logger.info(f"\n--- Chroma CBO Response ---\n{response}\n")
+
+            # Test Chroma Instructions tool
+            response = tax_agent_executor.invoke({"input": "Query form instructions for home office deduction"})
+            logger.info(f"\n--- Chroma Instructions Response ---\n{response}\n")
+
         except Exception as e:
             logger.error(f"Error during agent invocation test: {e}", exc_info=True)
     else:

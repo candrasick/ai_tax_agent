@@ -29,7 +29,7 @@ from ai_tax_agent.settings import settings
 from ai_tax_agent.llm_utils import get_embedding_function
 
 # --- Constants ---
-DEFAULT_CHROMA_PATH = os.path.join(PROJECT_ROOT, "chroma_db")
+DEFAULT_CHROMA_PATH = os.path.join(PROJECT_ROOT, "chroma_data")
 DEFAULT_COLLECTION_NAME = "cbo_revenue_projections"
 DEFAULT_INPUT_JSON = os.path.join(
     PROJECT_ROOT, "data/tax_statistics/cbo/cbo_chromadb_ingest_corrected.json"
