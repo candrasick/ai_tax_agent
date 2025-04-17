@@ -3,7 +3,8 @@
 Ingests CBO projection data from a JSON file into a ChromaDB collection.
 
 Reads a JSON file where each entry has 'text' and 'metadata' keys,
-generates embeddings using Google Generative AI, and stores them in ChromaDB.
+Generates embeddings using Google Generative AI (via LangChain),
+and stores documents, metadata, and embeddings manually in ChromaDB.
 """
 
 import argparse
@@ -17,6 +18,8 @@ from typing import Any, Dict, List
 
 import chromadb
 from tqdm import tqdm
+# Import the specific exception for rate limiting if needed for embed_documents
+from langchain_google_genai._common import GoogleGenerativeAIError
 
 # Add project root to path for local imports
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -32,7 +35,7 @@ DEFAULT_INPUT_JSON = os.path.join(
     PROJECT_ROOT, "data/tax_statistics/cbo/cbo_chromadb_ingest_corrected.json"
 )
 DEFAULT_BATCH_SIZE = 100  # Adjust based on API limits and performance
-RATE_LIMIT_DELAY = 1  # Seconds to wait between batches if rate limited
+RATE_LIMIT_DELAY = 60  # Increased delay for embedding API retries
 
 # --- Logging Setup ---
 logging.basicConfig(
@@ -146,8 +149,7 @@ def main():
     logger.info("Initializing ChromaDB client and embedding function...")
     try:
         chroma_client = initialize_chroma_client(args.chroma_path)
-        # Use the shared embedding function
-        embedding_function_instance = get_embedding_function()
+        embedding_function_instance = get_embedding_function() # Get raw LangChain instance
         if not embedding_function_instance:
              logger.error("Failed to initialize embedding function. Exiting.")
              sys.exit(1)
@@ -168,13 +170,13 @@ def main():
                 f"Could not delete collection '{args.collection_name}' (may not exist): {e}"
             )
 
-    # 4. Get or Create Collection
+    # 4. Get or Create Collection (WITHOUT embedding function specified)
     logger.info(f"Getting or creating collection: {args.collection_name}")
     try:
         collection = chroma_client.get_or_create_collection(
             name=args.collection_name,
-            embedding_function=embedding_function_instance,
-            metadata={"hnsw:space": "cosine"}
+            embedding_function=None, # Let ChromaDB know we handle embeddings
+            metadata={"hnsw:space": "cosine"} # Still specify distance if desired
         )
     except Exception as e:
         logger.error(f"Failed to get or create collection '{args.collection_name}': {e}", exc_info=True)
@@ -229,55 +231,98 @@ def main():
     total_docs = len(documents)
     logger.info(f"Prepared {total_docs} documents for ingestion.")
 
-    # 6. Batch Upsert with Rate Limiting
-    logger.info(f"Starting upsert process in batches of {args.batch_size}...")
+    # 6. Batch Embed and Upsert with Rate Limiting
+    logger.info(f"Starting embed & upsert process in batches of {args.batch_size}...")
     upserted_count = 0
-    for i in tqdm(range(0, total_docs, args.batch_size), desc="Ingesting Batches"):
+    for i in tqdm(range(0, total_docs, args.batch_size), desc="Embedding & Ingesting Batches"):
         batch_start = i
         batch_end = min(i + args.batch_size, total_docs)
         batch_docs = documents[batch_start:batch_end]
         batch_metadatas = metadatas[batch_start:batch_end]
         batch_ids = ids[batch_start:batch_end]
 
-        retries = 3
-        while retries > 0:
+        # --- Manual Embedding Step ---
+        batch_embeddings: List[List[float]] | None = None
+        embed_retries = 3
+        while embed_retries > 0:
             try:
-                collection.upsert(
-                    documents=batch_docs, metadatas=batch_metadatas, ids=batch_ids
-                )
-                upserted_count += len(batch_ids)
-                logger.debug(f"Upserted batch {i // args.batch_size + 1}/{total_docs // args.batch_size + 1}")
-                time.sleep(0.5) # Small delay
-                break  # Success, exit retry loop
-            except Exception as e:
-                # Basic rate limit check (can be improved by importing specific exception)
+                batch_embeddings = embedding_function_instance.embed_documents(batch_docs)
+                logger.debug(f"Successfully embedded batch {i // args.batch_size + 1}")
+                break # Success
+            except GoogleGenerativeAIError as e:
                 if "rate limit" in str(e).lower() or "quota" in str(e).lower() or "429" in str(e):
-                    retries -= 1
-                    wait_time = RATE_LIMIT_DELAY * (4 - retries) # Basic exponential backoff
+                    embed_retries -= 1
+                    wait_time = RATE_LIMIT_DELAY * (4 - embed_retries)
                     logger.warning(
-                        f"Rate limit likely hit on batch {i // args.batch_size + 1}. "
-                        f"Retrying in {wait_time}s... ({retries} retries left)"
+                        f"Rate limit hit during embedding batch {i // args.batch_size + 1}. "
+                        f"Retrying in {wait_time}s... ({embed_retries} retries left)"
                     )
                     time.sleep(wait_time)
                 else:
-                    logger.error(
-                        f"Error upserting batch {i // args.batch_size + 1}: {e}",
-                        exc_info=True
+                    logger.error(f"Non-rate-limit Google API error during embedding: {e}", exc_info=True)
+                    embed_retries = 0 # Stop retrying for other Google errors
+            except Exception as e:
+                logger.error(f"Unexpected error during embedding batch {i // args.batch_size + 1}: {e}", exc_info=True)
+                embed_retries = 0 # Stop retrying for other errors
+
+        if not batch_embeddings:
+            logger.error(f"Failed to embed batch {i // args.batch_size + 1} after retries. Skipping upsert for this batch.")
+            continue # Skip to the next batch
+        # --- End Manual Embedding Step ---
+
+        # --- Upsert Step (with generated embeddings) ---
+        upsert_retries = 3 # Separate retries for upsert just in case
+        while upsert_retries > 0:
+            try:
+                # Pre-check can still be useful if re-running script
+                existing_data = collection.get(ids=batch_ids, include=[]) # Don't need content back
+                existing_ids_set = set(existing_data['ids'])
+                new_indices = [idx for idx, batch_id in enumerate(batch_ids) if batch_id not in existing_ids_set]
+
+                if new_indices:
+                    ids_to_upsert = [batch_ids[i] for i in new_indices]
+                    docs_to_upsert = [batch_docs[i] for i in new_indices]
+                    meta_to_upsert = [batch_metadatas[i] for i in new_indices]
+                    embeds_to_upsert = [batch_embeddings[i] for i in new_indices]
+
+                    collection.upsert(
+                        ids=ids_to_upsert,
+                        documents=docs_to_upsert,
+                        metadatas=meta_to_upsert,
+                        embeddings=embeds_to_upsert # Pass generated embeddings
                     )
-                    retries = 0 # Stop retrying for non-rate-limit errors
-            if retries == 0:
-                 logger.error(f"Failed to upsert batch {i // args.batch_size + 1} after multiple retries. Skipping.")
+                    upserted_count += len(ids_to_upsert)
+                    logger.debug(f"Upserted batch {i // args.batch_size + 1} ({len(ids_to_upsert)} new items)")
+                else:
+                    logger.debug(f"Batch {i // args.batch_size + 1}: All items already exist. Skipping upsert.")
 
+                time.sleep(0.1) # Small delay even after success/skip
+                break  # Success or skip complete, exit upsert retry loop
 
+            except Exception as e:
+                upsert_retries -= 1
+                logger.error(
+                    f"Error upserting batch {i // args.batch_size + 1} to ChromaDB: {e}",
+                    exc_info=True
+                )
+                if upsert_retries > 0:
+                     logger.warning(f"Retrying upsert... ({upsert_retries} retries left)")
+                     time.sleep(1) # Short delay before upsert retry
+                else:
+                     logger.error("Failed to upsert batch after multiple retries. Skipping.")
+        # --- End Upsert Step ---
+
+    # --- Final Summary --- (Adjusted log messages)
     logger.info(f"--- Ingestion Complete ---")
-    logger.info(f"Total documents processed: {len(data)} (including skipped)")
-    logger.info(f"Total documents prepared for ChromaDB: {total_docs}")
-    logger.info(f"Total documents successfully upserted: {upserted_count}")
-    logger.info(f"Total documents skipped due to data issues: {skipped_count}")
+    logger.info(f"Total items in JSON: {len(data)}")
+    logger.info(f"Total items skipped due to data issues: {skipped_count}")
+    logger.info(f"Total documents prepared for embedding: {total_docs}")
+    logger.info(f"Total documents successfully upserted (new): {upserted_count}")
     try:
-        logger.info(f"Collection '{args.collection_name}' count: {collection.count()}")
+        final_count = collection.count()
+        logger.info(f"Final count in collection '{args.collection_name}': {final_count}")
     except Exception as e:
-        logger.warning(f"Could not get collection count: {e}")
+        logger.warning(f"Could not get final collection count: {e}")
     logger.info(f"Data ingested into collection: '{args.collection_name}' at '{args.chroma_path}'")
 
 
