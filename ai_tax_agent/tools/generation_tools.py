@@ -79,8 +79,72 @@ simplify_tool = Tool.from_function(
     args_schema=SimplifyInput # Use the Pydantic model for input validation
 )
 
-# --- Redraft Tool (Placeholder for now) ---
-# TODO: Implement Redraft tool later
+# --- Redraft Tool ---
+
+class RedraftInput(BaseModel):
+    """Input schema for the redraft_section_text tool."""
+    section_text: str = Field(description="The original text of the tax code section to be redrafted.")
+    # Optionally add context like: section_id: str, reason_for_redraft: str
+
+def redraft_section_text(section_text: str, model_name: str = "gemini-1.5-flash-latest", temperature: float = 0.2) -> str:
+    """
+    Analyzes the input section_text and generates a substantially rewritten version
+    focused on improving structure, modernizing language, removing outdated parts,
+    or enhancing logical flow, while preserving the core legal/financial intent.
+    Useful for significant revisions. Calls an LLM.
+
+    Args:
+        section_text: The original text of the tax code section.
+        model_name: The Gemini model to use for redrafting.
+        temperature: The sampling temperature for the LLM (slightly higher for more creative redrafting).
+
+    Returns:
+        The redrafted text string, or an error message if redrafting fails.
+    """
+    logger.info(f"Attempting to redraft text (length: {len(section_text)} chars) using {model_name}...")
+
+    # 1. Get LLM instance
+    llm = get_gemini_llm(model_name=model_name, temperature=temperature)
+    if not llm:
+        error_msg = "Failed to initialize LLM. Cannot redraft text."
+        logger.error(error_msg)
+        return f"[Error: {error_msg}]"
+
+    # 2. Define the redrafting prompt as a direct string
+    prompt_string = f"""System: You are an AI expert skilled in modernizing and restructuring complex legal text, specifically US tax code sections.
+Your task is to redraft the provided section text. This may involve significant changes like:
+- Restructuring sentences or paragraphs for better logical flow.
+- Replacing archaic language with modern, plain English equivalents.
+- Removing demonstrably redundant or outdated clauses (use judgment carefully).
+- Breaking down overly long sentences.
+Crucially, you MUST preserve the original legal meaning, scope, and financial intent of the section. Avoid introducing new loopholes or altering the fundamental application of the law.
+Output ONLY the redrafted text, without any preamble or explanation.
+
+Human: Please redraft the following tax code section text:
+
+{section_text}
+
+Redrafted Text:"""
+
+    # 3. Invoke the LLM with the direct string prompt
+    try:
+        logger.debug("Invoking LLM for redrafting...")
+        response = llm.invoke(prompt_string)
+        redrafted_text = response.content
+        logger.info(f"Successfully redrafted text. Output length: {len(redrafted_text)} chars.")
+        return redrafted_text.strip()
+    except Exception as e:
+        error_msg = f"Error during LLM invocation for redrafting: {e}"
+        logger.error(error_msg, exc_info=True)
+        return f"[Error: {error_msg}]"
+
+# Create the LangChain Tool
+redraft_tool = Tool.from_function(
+    func=redraft_section_text,
+    name="Redraft Section Text",
+    description="Generates a substantially rewritten version of a tax section text, focusing on improving structure, modernizing language, or enhancing logical flow while preserving core intent. Use for significant revisions. Input should be the original section text.",
+    args_schema=RedraftInput
+)
 
 # Example usage (for testing the tool function directly)
 # Note: Requires GEMINI_API_KEY to be set in the environment/.env file
@@ -88,18 +152,24 @@ if __name__ == '__main__':
     # Configure logging for better output during testing
     logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 
-    # Check if API key is likely available (basic check)
-    # In a real app, you'd use a settings management approach like Pydantic BaseSettings
-    import os
-    if not os.getenv("GEMINI_API_KEY"):
-         print("\nWARNING: GEMINI_API_KEY environment variable not found.")
-         print("LLM call in test mode will likely fail. Set the key in your .env file.")
-         # Optionally exit or skip the LLM call test
-         # exit() # Uncomment to stop if key is missing
-
+    # Use the same test text for both tools for comparison
     test_text = "Sec. 162. Trade or business expenses. (a) In general. There shall be allowed as a deduction all the ordinary and necessary expenses paid or incurred during the taxable year in carrying on any trade or business, including..."
+
+    # Check if API key is likely available (basic check)
+    import os
+    api_key_present = bool(os.getenv("GEMINI_API_KEY"))
+    if not api_key_present:
+        print("\nWARNING: GEMINI_API_KEY environment variable not found.")
+        print("LLM calls in test mode will likely fail. Set the key in your .env file.")
+
     print("\n--- Testing simplify_section_text ---")
-    result = simplify_section_text(section_text=test_text)
+    simplify_result = simplify_section_text(section_text=test_text)
     print(f"\nInput Text:\n{test_text}\n")
-    print(f"Output Simplified Text:\n{result}")
+    print(f"Output Simplified Text:\n{simplify_result}")
+
+    print("\n--- Testing redraft_section_text ---")
+    redraft_result = redraft_section_text(section_text=test_text)
+    print(f"\nInput Text:\n{test_text}\n")
+    print(f"Output Redrafted Text:\n{redraft_result}")
+
     print("\n--- Test Complete ---") 
