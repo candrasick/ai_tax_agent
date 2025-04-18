@@ -2,7 +2,7 @@ from sqlalchemy.orm import declarative_base
 from sqlalchemy import (Column, Integer, String, Text, Boolean, 
                         Date, TIMESTAMP, ForeignKey, func, UniqueConstraint, Numeric, Float)
 from sqlalchemy.orm import relationship
-from typing import Optional
+from typing import Optional, List
 from sqlalchemy.orm import Mapped, mapped_column # Use modern Mapped/mapped_column if consistent with rest of file
 
 # Base class for all ORM models
@@ -56,6 +56,11 @@ class UsCodeSection(Base):
     
     # Relationship to impact assessment (one-to-one)
     impact_assessment = relationship("SectionImpact", back_populates="us_code_section", uselist=False, cascade="all, delete-orphan")
+
+    # Relationship to revisions (one-to-many)
+    revisions = relationship("UsCodeSectionRevised", back_populates="original_section", cascade="all, delete-orphan")
+    # Relationship to history (one-to-many)
+    history_entries = relationship("SectionHistory", back_populates="original_section", cascade="all, delete-orphan")
 
     def __repr__(self):
         return f"<UsCodeSection(id={self.id}, title={self.title_number}, section={self.section_number} - '{self.section_title}')>"
@@ -268,3 +273,54 @@ class SectionImpact(Base):
 
     def __repr__(self):
         return f"<SectionImpact(section_id={self.section_id})>" 
+
+# --- New UsCodeSectionRevised Model --- #
+class UsCodeSectionRevised(Base):
+    __tablename__ = 'us_code_section_revised'
+
+    id = Column(Integer, primary_key=True)
+    orig_section_id = Column(Integer, ForeignKey('us_code_section.id', ondelete='CASCADE'), nullable=False, index=True)
+    version = Column(Integer, nullable=False, index=True)
+    deleted = Column(Boolean, nullable=False, default=False)
+    
+    # Replicated fields (using Text for flexibility)
+    subtitle = Column(Text, nullable=True)
+    chapter = Column(Text, nullable=True)
+    subchapter = Column(Text, nullable=True)
+    part = Column(Text, nullable=True)
+    section_number = Column(Text, nullable=False)
+    section_title = Column(Text, nullable=True)
+    core_text = Column(Text, nullable=True) # The revised text, or null if deleted
+    
+    revised_complexity = Column(Float, nullable=True) # Complexity score of this version
+    revised_financial_impact = Column(Numeric, nullable=True, comment="Estimated financial impact of this revised version.") # New column
+
+    created_at = Column(TIMESTAMP, server_default=func.now(), nullable=False)
+    updated_at = Column(TIMESTAMP, server_default=func.now(), onupdate=func.now(), nullable=False)
+
+    # Relationship back to the original UsCodeSection
+    original_section = relationship("UsCodeSection", back_populates="revisions")
+
+    # Add unique constraint for original section and version
+    __table_args__ = (UniqueConstraint('orig_section_id', 'version', name='uq_orig_section_version'),)
+
+    def __repr__(self):
+        status = "[DELETED]" if self.deleted else ""
+        return f"<UsCodeSectionRevised(id={self.id}, orig_id={self.orig_section_id}, v={self.version}, section={self.section_number} {status})>"
+
+# --- New SectionHistory Model --- #
+class SectionHistory(Base):
+    __tablename__ = 'section_history'
+
+    id = Column(Integer, primary_key=True)
+    orig_section_id = Column(Integer, ForeignKey('us_code_section.id', ondelete='CASCADE'), nullable=False, index=True)
+    version_changed = Column(Integer, nullable=False, index=True, comment="Version number where this change occurred")
+    action = Column(Text, nullable=False, comment="Action taken (e.g., simplify, delete, keep, redraft)")
+    rationale = Column(Text, nullable=True, comment="Rationale for the action")
+    created_at = Column(TIMESTAMP, server_default=func.now(), nullable=False)
+
+    # Relationship back to the original UsCodeSection
+    original_section = relationship("UsCodeSection", back_populates="history_entries")
+
+    def __repr__(self):
+        return f"<SectionHistory(id={self.id}, orig_id={self.orig_section_id}, v={self.version_changed}, action='{self.action}')>" 

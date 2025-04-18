@@ -1,107 +1,159 @@
-# scripts/plot_complexity_distribution.py
+#!/usr/bin/env python
+"""Generates a 3D scatter plot of tax sections based on impact and complexity."""
 
-import argparse
 import logging
-import os
 import sys
-from typing import List
+import argparse
+from pathlib import Path
 
+import pandas as pd
+import numpy as np
 import matplotlib.pyplot as plt
-import seaborn as sns
+from mpl_toolkits.mplot3d import Axes3D # Required for 3D projection
 from sqlalchemy.orm import Session
-from sqlalchemy import select
 
-# Add project root to Python path
-project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, project_root)
+# Adjust import path based on your project structure
+sys.path.append('.')
 
-from ai_tax_agent.settings import settings # Assuming settings might be needed indirectly by session
 from ai_tax_agent.database.session import get_session
-# Import relevant models
-from ai_tax_agent.database.models import SectionComplexity
+from ai_tax_agent.database.models import UsCodeSection, SectionImpact, SectionComplexity
 
-# --- Basic Logging Setup ---
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 
-# --- Constants ---
-OUTPUT_DIR = "plots"
-OUTPUT_FILENAME = "complexity.png"
 
-# --- Main Logic ---
-def main():
-    parser = argparse.ArgumentParser(description="Generate a histogram plot of section complexity scores.")
-    parser.add_argument("--log-level", default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"], help="Set the logging level.")
-    args = parser.parse_args()
-
-    # Set log level
-    log_level = getattr(logging, args.log_level)
-    logging.getLogger().setLevel(log_level)
-    logging.getLogger('matplotlib').setLevel(logging.WARNING) # Reduce matplotlib verbosity
-    logging.getLogger('seaborn').setLevel(logging.WARNING)
-    logger.info("--- Starting Complexity Plotting Script ---")
-
-    output_path = os.path.join(OUTPUT_DIR, OUTPUT_FILENAME)
-
-    scores: List[float] = []
+def fetch_plot_data(db: Session) -> pd.DataFrame:
+    """Fetches data required for the 3D scatter plot from the database."""
+    logger.info("Fetching data for 3D scatter plot...")
     try:
-        db: Session = get_session()
-        logger.info("Database session acquired.")
-
-        # Query SectionComplexity for scores
-        logger.info("Querying database for complexity scores...")
         query = (
-            select(SectionComplexity.complexity_score)
-            .where(SectionComplexity.complexity_score.isnot(None)) # Only get non-null scores
+            db.query(
+                UsCodeSection.id,
+                UsCodeSection.section_number,
+                SectionImpact.revenue_impact,
+                SectionImpact.entity_impact,
+                SectionComplexity.complexity_score
+            )
+            .join(SectionImpact, UsCodeSection.id == SectionImpact.section_id)
+            .join(SectionComplexity, UsCodeSection.id == SectionComplexity.section_id)
+            # Ensure all required fields are not NULL
+            .filter(
+                SectionImpact.revenue_impact.isnot(None),
+                SectionImpact.entity_impact.isnot(None),
+                SectionComplexity.complexity_score.isnot(None)
+            )
         )
-
-        results = db.execute(query).scalars().all() # Fetch all scores
-        scores = [float(s) for s in results] # Ensure they are floats
-
-        logger.info(f"Found {len(scores)} sections with complexity scores.")
-
+        
+        df = pd.read_sql(query.statement, db.bind)
+        logger.info(f"Fetched {len(df)} sections with complete impact and complexity data.")
+        return df
     except Exception as e:
-        logger.critical(f"An error occurred during database query: {e}", exc_info=True)
-        if 'db' in locals() and db.is_active:
-             db.rollback()
-        return # Exit if DB query fails
-    finally:
-        if 'db' in locals() and db:
-            db.close()
-            logger.info("Database session closed.")
+        logger.error(f"Database error fetching plot data: {e}", exc_info=True)
+        raise # Re-raise the exception to be caught in main
 
-    if not scores:
-        logger.warning("No complexity scores found in the database. Cannot generate plot.")
+def create_3d_scatter_plot(df: pd.DataFrame, output_path: Path):
+    """Creates and saves the 3D scatter plot."""
+    if df.empty:
+        logger.warning("DataFrame is empty after processing. Cannot create plot.")
         return
 
-    # --- Plotting ---
+    logger.info(f"Creating 3D scatter plot with {len(df)} data points...")
+    fig = plt.figure(figsize=(12, 8))
+    ax = fig.add_subplot(111, projection='3d')
+
+    # Scatter plot using processed data
+    scatter = ax.scatter(
+        df['log_revenue_impact'], 
+        df['log_entity_impact'], 
+        df['normalized_complexity'], 
+        c=df['normalized_complexity'], # Color by complexity
+        cmap='viridis', # Colormap (options: 'plasma', 'inferno', 'magma', 'cividis', etc.)
+        marker='o'
+    )
+
+    # Adding labels and title
+    ax.set_xlabel('Financial Impact (Log10 Scale, $)')
+    ax.set_ylabel('Entity Impact (Log10 Scale, People/Forms)')
+    ax.set_zlabel('Complexity Score (Normalized 0-1)')
+    plt.title('Tax Section Impact vs. Complexity')
+
+    # Add a color bar
+    fig.colorbar(scatter, label='Normalized Complexity Score')
+
+    # Ensure the output directory exists
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # Save the plot
     try:
-        logger.info("Generating complexity score distribution plot...")
-        plt.style.use('seaborn-v0_8-deep') # Use a style similar to the example
-        plt.figure(figsize=(14, 7)) # Set figure size similar to example
-
-        # Create histogram with KDE
-        sns.histplot(scores, kde=True, bins=30, edgecolor='black') # Adjust bins as needed
-
-        # Set labels and title
-        plt.xlabel("Complexity Score")
-        plt.ylabel("Number of Sections")
-        plt.title("Distribution of Complexity Scores Across All Sections")
-
-        # Ensure output directory exists
-        os.makedirs(OUTPUT_DIR, exist_ok=True)
-        logger.info(f"Ensured output directory '{OUTPUT_DIR}' exists.")
-
-        # Save the plot
-        plt.savefig(output_path)
+        plt.savefig(output_path, dpi=300, bbox_inches='tight')
         logger.info(f"Plot saved successfully to {output_path}")
-        plt.close() # Close the plot figure
-
     except Exception as e:
-        logger.critical(f"An error occurred during plot generation or saving: {e}", exc_info=True)
-
-    logger.info("--- Complexity Plotting Script Finished ---")
+        logger.error(f"Error saving plot to {output_path}: {e}", exc_info=True)
+    finally:
+        plt.close(fig) # Close the figure to free memory
 
 
 if __name__ == "__main__":
-    main() 
+    parser = argparse.ArgumentParser(description="Generate a 3D scatter plot of tax section impact vs complexity.")
+    parser.add_argument("--output", type=str, default="plots/section_impact_complexity_3d.png", help="Output path for the PNG file.")
+    # Add other arguments if needed later (e.g., filters)
+    args = parser.parse_args()
+
+    output_file = Path(args.output)
+
+    db: Session = get_session()
+    if not db:
+        logger.error("Failed to get database session. Exiting.")
+        sys.exit(1)
+
+    try:
+        plot_df = fetch_plot_data(db)
+
+        if plot_df.empty:
+             logger.warning("No data fetched from database with required fields. Exiting.")
+             sys.exit(0)
+
+        # --- Data Preprocessing ---
+        # Convert impacts to numeric, coercing errors (though query should filter nulls)
+        plot_df['revenue_impact'] = pd.to_numeric(plot_df['revenue_impact'], errors='coerce')
+        plot_df['entity_impact'] = pd.to_numeric(plot_df['entity_impact'], errors='coerce')
+        plot_df['complexity_score'] = pd.to_numeric(plot_df['complexity_score'], errors='coerce')
+        
+        # Drop rows where conversion failed (if any)
+        plot_df.dropna(subset=['revenue_impact', 'entity_impact', 'complexity_score'], inplace=True)
+
+        # Filter out non-positive values for log scale
+        initial_count = len(plot_df)
+        plot_df = plot_df[(plot_df['revenue_impact'] > 0) & (plot_df['entity_impact'] > 0)]
+        filtered_count = initial_count - len(plot_df)
+        if filtered_count > 0:
+             logger.info(f"Filtered out {filtered_count} sections with non-positive impact values.")
+             
+        if plot_df.empty:
+             logger.warning("No data remaining after filtering for log scale. Exiting.")
+             sys.exit(0)
+
+        # Log Scale
+        plot_df['log_revenue_impact'] = np.log10(plot_df['revenue_impact'])
+        plot_df['log_entity_impact'] = np.log10(plot_df['entity_impact'])
+
+        # Normalize Complexity Score (Min-Max Scaling 0-1)
+        min_complexity = plot_df['complexity_score'].min()
+        max_complexity = plot_df['complexity_score'].max()
+        if max_complexity > min_complexity:
+            plot_df['normalized_complexity'] = (plot_df['complexity_score'] - min_complexity) / (max_complexity - min_complexity)
+        else:
+             # Handle case where all complexities are the same
+             logger.warning("All complexity scores are identical. Setting normalized score to 0.5.")
+             plot_df['normalized_complexity'] = 0.5 
+        # -------------------------
+
+        create_3d_scatter_plot(plot_df, output_file)
+
+    except Exception as e:
+        logger.error(f"An error occurred during script execution: {e}", exc_info=True)
+        sys.exit(1)
+    finally:
+        if db:
+            db.close()
+            logger.debug("Database session closed.") 
