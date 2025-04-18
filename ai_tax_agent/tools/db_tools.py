@@ -3,7 +3,7 @@
 
 import logging
 from decimal import Decimal, InvalidOperation
-from typing import Dict, Any
+from typing import Dict, Any, List
 
 from sqlalchemy import func as sql_func
 from sqlalchemy.orm import Session
@@ -16,6 +16,7 @@ from ai_tax_agent.database.models import (
     FormFieldStatistics,
     FormField,
     FormInstruction,
+    Exemption,
 )
 
 logger = logging.getLogger(__name__)
@@ -125,15 +126,15 @@ def get_section_stats(section_identifier: str) -> str:
 
 # --- New Detailed Stats Function ---
 
-def get_section_details_and_stats(section_identifier: str) -> str:
-    """Fetches detailed info and aggregated stats for form fields linked to a US Code section.
+def get_section_details_and_stats(section_identifier: str) -> Dict[str, Any] | str:
+    """Fetches detailed info, core text, exemptions, and aggregated stats for a US Code section.
 
     Args:
         section_identifier: The identifier of the US Code section (e.g., '162' or the primary key ID).
 
     Returns:
-        A string summarizing the aggregated statistics and listing details
-        for each linked form field, or an error message.
+        A dictionary containing section details, stats, core text, and exemptions,
+        or an error string.
     """
     db: Session = get_session()
     if not db:
@@ -141,14 +142,18 @@ def get_section_details_and_stats(section_identifier: str) -> str:
 
     section_id_int: int | None = None
     section_number_str: str | None = None
+    core_text: str | None = None
+    section_title: str | None = None
 
-    # 1. Find Section ID and Number
+    # 1. Find Section ID, Number, and Core Text
     try:
         section_id_int = int(section_identifier)
         logger.debug(f"Interpreted section identifier '{section_identifier}' as primary key ID.")
         section = db.query(UsCodeSection).filter(UsCodeSection.id == section_id_int).first()
         if section:
             section_number_str = section.section_number
+            core_text = section.core_text
+            section_title = section.section_title
         else:
             logger.warning(f"No section found with ID: {section_id_int}")
             section_id_int = None # Reset to try searching by number string
@@ -160,6 +165,8 @@ def get_section_details_and_stats(section_identifier: str) -> str:
         section = db.query(UsCodeSection).filter(sql_func.lower(UsCodeSection.section_number) == section_number_str.lower()).first()
         if section:
             section_id_int = section.id
+            core_text = section.core_text
+            section_title = section.section_title
             logger.debug(f"Found section ID {section_id_int} for section number '{section_number_str}'.")
         else:
             logger.warning(f"No section found matching identifier: '{section_identifier}'.")
@@ -189,56 +196,87 @@ def get_section_details_and_stats(section_identifier: str) -> str:
             .order_by(FormField.id) # Consistent ordering
         )
 
-        results = details_query.all()
+        field_results = details_query.all()
 
-        if not results:
-            db.close()
-            return f"Section '{section_display_name}' (ID: {section_id_int}) found, but no form fields are linked to it in the database."
+        # Handle case where section exists but has no linked fields
+        if not field_results:
+            logger.warning(f"Section '{section_display_name}' (ID: {section_id_int}) found, but no form fields are linked.")
+            # Proceed to fetch exemptions even if no fields are linked
 
-        logger.info(f"Found {len(results)} linked form field details for section ID {section_id_int}.")
-
-        # 3. Process Results: Aggregate and Itemize
+        # 3. Process Field Results: Aggregate and Itemize
         total_dollars = Decimal(0)
         total_forms = Decimal(0)
         total_people = Decimal(0)
-        itemized_details = []
+        itemized_field_details: List[Dict[str, Any]] = [] # Store as list of dicts
 
-        for row in results:
+        for row in field_results:
             field_data = row._asdict()
             # Aggregate (handle Nones)
-            total_dollars += field_data.get('dollars') or Decimal(0)
-            total_forms += field_data.get('forms') or Decimal(0)
-            total_people += field_data.get('people') or Decimal(0)
+            dollars_val = field_data.get('dollars') or Decimal(0)
+            forms_val = field_data.get('forms') or Decimal(0)
+            people_val = field_data.get('people') or Decimal(0)
+            total_dollars += dollars_val
+            total_forms += forms_val
+            total_people += people_val
 
             # Prepare itemized entry
-            # Truncate full_text for readability in the final output
             full_text_snippet = (field_data.get('full_text') or "")[:150] + ("..." if len(field_data.get('full_text') or "") > 150 else "")
-            item = (
-                f"  - Field ID: {field_data.get('field_id')}\n"
-                f"    Label: {field_data.get('field_label') or 'N/A'}\n"
-                f"    Instruction: {(field_data.get('instruction_title') or 'N/A')} ({field_data.get('form_number') or 'N/A'})\n"
-                f"    Stats (Dollars/Forms/People): {field_data.get('dollars') or 0:,.0f} / {field_data.get('forms') or 0:,.0f} / {field_data.get('people') or 0:,.0f}\n"
-                f"    Full Text Snippet: {full_text_snippet}"
+            item = {
+                "field_id": field_data.get('field_id'),
+                "label": field_data.get('field_label') or 'N/A',
+                "instruction_title": field_data.get('instruction_title') or 'N/A',
+                "form_number": field_data.get('form_number') or 'N/A',
+                "stats_dollars": float(dollars_val) if dollars_val is not None else 0.0, # Convert Decimal to float for JSON
+                "stats_forms": float(forms_val) if forms_val is not None else 0.0,
+                "stats_people": float(people_val) if people_val is not None else 0.0,
+                "full_text_snippet": full_text_snippet
+            }
+            itemized_field_details.append(item)
+
+        # 4. Query for Exemptions
+        exemptions_query = (
+            db.query(
+                Exemption.id,
+                Exemption.relevant_text,
+                Exemption.rationale
             )
-            itemized_details.append(item)
-
-        # 4. Format Output
-        summary_str = (
-            f"Statistics Summary for Section '{section_display_name}' (ID: {section_id_int}):\n"
-            f"- Based on {len(results)} linked form field(s).\n"
-            f"- Total Dollars: {total_dollars:,.0f}\n"
-            f"- Total Forms: {total_forms:,.0f}\n"
-            f"- Total People: {total_people:,.0f}"
+            .filter(Exemption.section_id == section_id_int)
+            .order_by(Exemption.id)
         )
+        exemption_results = exemptions_query.all()
+        itemized_exemptions: List[Dict[str, Any]] = [
+            {
+                "exemption_id": ex.id,
+                "relevant_text": ex.relevant_text,
+                "rationale": ex.rationale
+            } for ex in exemption_results
+        ]
+        logger.info(f"Found {len(itemized_exemptions)} exemptions for section ID {section_id_int}.")
 
-        details_str = "\n\nLinked Form Field Details:\n" + "\n".join(itemized_details)
+
+        # 5. Assemble Output Dictionary
+        output_data = {
+            "section_identifier": section_display_name,
+            "section_id": section_id_int,
+            "core_text": core_text,
+            "section_title": section_title,
+            "aggregation_summary": {
+                "linked_field_count": len(field_results),
+                "total_dollars": float(total_dollars) if total_dollars is not None else 0.0, # Convert Decimal to float
+                "total_forms": float(total_forms) if total_forms is not None else 0.0,
+                "total_people": float(total_people) if total_people is not None else 0.0,
+            },
+            "linked_form_fields": itemized_field_details,
+            "exemptions": itemized_exemptions
+        }
+
 
         logger.info(f"Successfully retrieved details and aggregated stats for section {section_id_int}.")
-        return summary_str + details_str
+        return output_data # Return the dictionary
 
     except Exception as e:
         logger.error(f"Error fetching detailed stats for section ID {section_id_int}: {e}", exc_info=True)
-        return f"Error: An unexpected error occurred while fetching detailed statistics for section '{section_display_name}'."
+        return f"Error: An unexpected error occurred while fetching detailed statistics for section '{section_display_name}'." # Return error string
     finally:
         if db:
             db.close()
@@ -246,22 +284,33 @@ def get_section_details_and_stats(section_identifier: str) -> str:
 
 # Example Usage (Optional)
 if __name__ == '__main__':
+    import json # Add json for pretty printing
     logging.basicConfig(level=logging.DEBUG) # Use DEBUG to see identifier lookups
 
     # Test with an ID assumed to exist
     test_id = "6"
     print(f"--- Testing Detailed Stats with ID: {test_id} ---")
-    print(get_section_details_and_stats(test_id))
+    result_id = get_section_details_and_stats(test_id)
+    print(json.dumps(result_id, indent=2) if isinstance(result_id, dict) else result_id) # Pretty print JSON
     print("-"*50)
 
     # Test with a section number assumed to exist
     test_num = "162" # Replace with a section number in your DB
     print(f"--- Testing Detailed Stats with Section Number: {test_num} ---")
-    print(get_section_details_and_stats(test_num))
+    result_num = get_section_details_and_stats(test_num)
+    print(json.dumps(result_num, indent=2) if isinstance(result_num, dict) else result_num) # Pretty print JSON
     print("-"*50)
 
     # Test with a non-existent identifier
     test_not_found = "999999"
     print(f"--- Testing Detailed Stats with Non-existent ID: {test_not_found} ---")
-    print(get_section_details_and_stats(test_not_found))
+    result_not_found = get_section_details_and_stats(test_not_found)
+    print(json.dumps(result_not_found, indent=2) if isinstance(result_not_found, dict) else result_not_found) # Pretty print JSON
+    print("-"*50)
+
+    # Test section with exemptions but maybe no fields (replace '1' with actual ID)
+    test_exempt_only = "1"
+    print(f"--- Testing Detailed Stats with Section ID: {test_exempt_only} (May have exemptions only) ---")
+    result_exempt = get_section_details_and_stats(test_exempt_only)
+    print(json.dumps(result_exempt, indent=2) if isinstance(result_exempt, dict) else result_exempt) # Pretty print JSON
     print("-"*50) 
