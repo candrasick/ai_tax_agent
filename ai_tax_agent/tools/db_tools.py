@@ -17,6 +17,8 @@ from ai_tax_agent.database.models import (
     FormField,
     FormInstruction,
     Exemption,
+    SectionImpact,
+    SectionComplexity
 )
 
 logger = logging.getLogger(__name__)
@@ -277,6 +279,73 @@ def get_section_details_and_stats(section_identifier: str) -> Dict[str, Any] | s
     except Exception as e:
         logger.error(f"Error fetching detailed stats for section ID {section_id_int}: {e}", exc_info=True)
         return f"Error: An unexpected error occurred while fetching detailed statistics for section '{section_display_name}'." # Return error string
+    finally:
+        if db:
+            db.close()
+
+
+# --- New Function for Simplification Context --- 
+
+def get_section_simplification_context(section_identifier: str) -> Dict[str, Any] | str:
+    """Fetches core text, impact, complexity, and exemption details for a section."""
+    db: Session = get_session()
+    if not db:
+        return "Error: Could not get database session."
+
+    section_id_int: int | None = None
+    section_number_str: str | None = None
+    section_data = {}
+
+    # 1. Find Section ID and Basic Info
+    try:
+        # Find Section ID (similar logic as get_section_details_and_stats)
+        try:
+            section_id_int = int(section_identifier)
+            section = db.query(UsCodeSection).filter(UsCodeSection.id == section_id_int).first()
+            if section: section_number_str = section.section_number
+        except ValueError:
+            section_number_str = section_identifier
+            section = db.query(UsCodeSection).filter(sql_func.lower(UsCodeSection.section_number) == section_number_str.lower()).first()
+            if section: section_id_int = section.id
+
+        if not section:
+            return f"Error: Could not find UsCodeSection matching '{section_identifier}'."
+
+        section_data['section_id'] = section_id_int
+        section_data['section_identifier'] = section_number_str or section_identifier
+        section_data['core_text'] = section.core_text
+
+        # 2. Fetch Section Impact (Handle if missing)
+        impact = db.query(SectionImpact).filter(SectionImpact.section_id == section_id_int).first()
+        section_data['section_revenue_impact'] = float(impact.revenue_impact) if impact and impact.revenue_impact is not None else None
+        section_data['section_entity_impact'] = float(impact.entity_impact) if impact and impact.entity_impact is not None else None
+        logger.debug(f"Fetched SectionImpact for {section_id_int}: Rev={section_data['section_revenue_impact']}, Ent={section_data['section_entity_impact']}")
+
+        # 3. Fetch Section Complexity (Handle if missing)
+        complexity = db.query(SectionComplexity).filter(SectionComplexity.section_id == section_id_int).first()
+        section_data['complexity_score'] = complexity.complexity_score if complexity else None
+        logger.debug(f"Fetched SectionComplexity for {section_id_int}: Score={section_data['complexity_score']}")
+
+        # 4. Fetch Exemptions (with their impacts)
+        exemptions_query = db.query(Exemption).filter(Exemption.section_id == section_id_int).order_by(Exemption.id)
+        exemptions_list = []
+        for ex in exemptions_query.all():
+            exemptions_list.append({
+                "exemption_id": ex.id,
+                "relevant_text": ex.relevant_text,
+                # Use revenue_impact_estimate and entity_impact from Exemption table
+                "revenue_impact": float(ex.revenue_impact_estimate) if ex.revenue_impact_estimate is not None else None,
+                "entity_impact": float(ex.entity_impact) if ex.entity_impact is not None else None,
+                "rationale": ex.rationale # Keep original rationale if needed
+            })
+        section_data['exemptions'] = exemptions_list
+        logger.info(f"Found {len(exemptions_list)} exemptions with impact data for section {section_id_int}.")
+
+        return section_data
+
+    except Exception as e:
+        logger.error(f"Error fetching simplification context for '{section_identifier}': {e}", exc_info=True)
+        return f"Error: An unexpected error occurred while fetching context for '{section_identifier}'."
     finally:
         if db:
             db.close()
