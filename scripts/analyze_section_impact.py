@@ -23,7 +23,8 @@ from langchain_core.runnables import Runnable # For type hinting agent executor
 from ai_tax_agent.database.models import UsCodeSection, SectionImpact, Exemption
 
 logger = logging.getLogger(__name__)
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+# Set default logging level to ERROR
+logging.basicConfig(level=logging.ERROR, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 
 # --- Helper Function --- 
 
@@ -338,7 +339,7 @@ if __name__ == "__main__":
 
     # Initialize LLM Chain (Agent Executor) Once
     logger.info("Initializing Tax Analysis Agent (LLM Chain)...")
-    llm_chain_executor = create_tax_analysis_agent(verbose=False) # verbose=True for debugging agent steps
+    llm_chain_executor = create_tax_analysis_agent(llm_model_name="gemini-1.5-pro", verbose=False) # verbose=True for debugging agent steps
     if not llm_chain_executor:
         logger.error("Failed to initialize the Tax Analysis Agent. Exiting.")
         sys.exit(1)
