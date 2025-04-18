@@ -9,6 +9,8 @@ from decimal import Decimal
 from typing import Dict, Any, List, Optional # Updated imports
 from pathlib import Path
 import re # <-- Import re module
+from sqlalchemy.orm import Session
+from tqdm import tqdm
 
 # Adjust import path based on your project structure
 # This assumes the script is run from the project root directory
@@ -18,6 +20,7 @@ from ai_tax_agent.tools.db_tools import get_section_details_and_stats
 from ai_tax_agent.database.session import get_session # Needed for potential future DB writes
 from ai_tax_agent.agents import create_tax_analysis_agent # <-- Import the agent creator
 from langchain_core.runnables import Runnable # For type hinting agent executor
+from ai_tax_agent.database.models import UsCodeSection, SectionImpact, Exemption
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -208,6 +211,106 @@ def analyze_entire_section(
         "exemptions_analysis": exemptions_analysis
     }
 
+# --- Database Saving Function ---
+def save_analysis_results(db: Session, section_summary: Dict[str, Any], exemptions_analysis: List[Dict[str, Any]]) -> tuple[bool, bool]: # Added return type hint
+    """Saves the analysis results to the database.
+
+    Returns:
+        A tuple: (bool indicating if save was successful, bool indicating if impact was null).
+    """
+    section_id = section_summary.get("section_id")
+    if not section_id:
+        logger.error("Section summary missing section_id. Cannot save.")
+        return False, True # Indicate save failure and treat as null impact
+
+    results_saved = False
+    null_results_section = True # Track if section impact is effectively null
+    null_results_exemptions = True # Track if all exemption impacts are null
+
+    try:
+        # --- Save/Update SectionImpact ---
+        impact_record = db.query(SectionImpact).filter(SectionImpact.section_id == section_id).first()
+        if not impact_record:
+            impact_record = SectionImpact(section_id=section_id)
+            db.add(impact_record)
+            logger.debug(f"Creating new SectionImpact record for section_id: {section_id}")
+        else:
+            logger.debug(f"Updating existing SectionImpact record for section_id: {section_id}")
+
+        # Convert potentially None values from analysis to Decimal or keep as None for DB
+        # Check types robustly before conversion
+        revenue_impact_val = section_summary.get('direct_revenue_impact')
+        entity_impact_val = section_summary.get('direct_entity_impact')
+        
+        revenue_impact = Decimal(revenue_impact_val) if isinstance(revenue_impact_val, (int, float)) else None
+        entity_impact = Decimal(entity_impact_val) if isinstance(entity_impact_val, (int, float)) else None
+
+        impact_record.revenue_impact = revenue_impact
+        impact_record.entity_impact = entity_impact
+        impact_record.rationale = section_summary.get('direct_impact_rationale')
+
+        if revenue_impact is not None or entity_impact is not None:
+             null_results_section = False
+
+        # --- Update Exemptions --- Add Exemption import
+        for exemption_result in exemptions_analysis:
+            exemption_id = exemption_result.get("exemption_id")
+            if not exemption_id:
+                logger.warning("Exemption analysis result missing exemption_id. Skipping update.")
+                continue
+
+            exemption_record = db.query(Exemption).filter(Exemption.id == exemption_id).first()
+            if not exemption_record:
+                logger.warning(f"Could not find Exemption record with id: {exemption_id} to update.")
+                continue
+
+            # Convert potentially None values from analysis to Decimal or keep as None for DB
+            rev_impact_est_val = exemption_result.get('revenue_impact_estimate')
+            ent_impact_est_val = exemption_result.get('entity_impact')
+            rev_impact_est = None
+            ent_impact_est = None
+
+            try:
+                 if isinstance(rev_impact_est_val, (int, float)):
+                      rev_impact_est = Decimal(rev_impact_est_val)
+                 elif isinstance(rev_impact_est_val, str):
+                      # Attempt conversion if it looks like a number, otherwise None
+                      rev_impact_est = Decimal(rev_impact_est_val.replace(",","")) # Handle commas
+            except (ValueError, TypeError, InvalidOperation):
+                 logger.warning(f"Invalid format for revenue_impact_estimate on exemption {exemption_id}: '{rev_impact_est_val}'. Setting to None.")
+                 rev_impact_est = None
+
+            try:
+                 if isinstance(ent_impact_est_val, (int, float)):
+                      ent_impact_est = Decimal(ent_impact_est_val)
+                 elif isinstance(ent_impact_est_val, str):
+                      ent_impact_est = Decimal(ent_impact_est_val.replace(",","")) # Handle commas
+            except (ValueError, TypeError, InvalidOperation):
+                 logger.warning(f"Invalid format for entity_impact on exemption {exemption_id}: '{ent_impact_est_val}'. Setting to None.")
+                 ent_impact_est = None
+
+            exemption_record.revenue_impact_estimate = rev_impact_est
+            exemption_record.entity_impact = ent_impact_est
+            exemption_record.rationale = exemption_result.get('analysis_rationale')
+
+            if rev_impact_est is not None or ent_impact_est is not None:
+                 null_results_exemptions = False
+
+            logger.debug(f"Updated Exemption record id: {exemption_id}")
+
+        db.commit()
+        logger.info(f"Successfully saved analysis results for section_id: {section_id}")
+        results_saved = True
+
+    except Exception as e:
+        logger.error(f"Database error saving results for section_id {section_id}: {e}", exc_info=True)
+        db.rollback() # Rollback on error
+        results_saved = False # Explicitly mark as not saved
+
+    # Determine if the overall result was null
+    is_null_result = null_results_section and null_results_exemptions
+    return results_saved, is_null_result
+
 # --- Main Execution --- 
 
 if __name__ == "__main__":
@@ -241,18 +344,110 @@ if __name__ == "__main__":
         sys.exit(1)
     logger.info("Tax Analysis Agent (LLM Chain) initialized successfully.")
 
-    # Run the main analysis function
-    try:
-        analysis_result = analyze_entire_section(
-            llm_chain_executor, 
-            exemption_prompt_template_content, 
-            args.section_identifier
-        )
-        print(json.dumps(analysis_result, indent=2))
-        logger.info(f"Successfully completed analysis for section identifier: {args.section_identifier}")
-    except ValueError as ve:
-        logger.error(f"Analysis failed: {ve}")
+    # --- Determine Sections to Process ---
+    sections_to_process = []
+    
+    # --- Get DB Session --- 
+    db: Session = get_session()
+    if not db:
+        logger.error("Failed to get database session. Exiting.")
         sys.exit(1)
-    except Exception as e:
-        logger.error(f"An unexpected error occurred during analysis: {e}", exc_info=True)
-        sys.exit(1) 
+    # ---------------------
+
+    try: # Use try...finally to ensure db is closed
+        if args.section:
+             # If a specific section is provided, analyze only that one
+             sections_to_process = [args.section] # Keep as string identifier
+             logger.info(f"Analyzing specific section identifier provided: {args.section}")
+        else:
+            logger.info("Fetching sections from database...")
+            # Now db should be defined
+            all_section_ids_query = db.query(UsCodeSection.id) 
+            all_section_ids = [s.id for s in all_section_ids_query.all()]
+            logger.info(f"Found {len(all_section_ids)} total sections.")
+
+            if not args.clear:
+                logger.info("Checking for existing impact data (running in incremental mode)...")
+                existing_impact_ids_query = db.query(SectionImpact.section_id)
+                existing_impact_ids = {s.section_id for s in existing_impact_ids_query.all()}
+                logger.info(f"Found {len(existing_impact_ids)} sections with existing impact data.")
+                sections_to_process_ids = [sid for sid in all_section_ids if sid not in existing_impact_ids]
+                logger.info(f"{len(sections_to_process_ids)} sections remaining to be analyzed.")
+            else:
+                logger.info("Running in --clear mode. Analyzing all sections.")
+                sections_to_process_ids = all_section_ids
+
+            # Apply limit if specified (after filtering)
+            if args.limit is not None and args.limit > 0:
+                logger.info(f"Applying limit: Analyzing only the first {args.limit} sections.")
+                sections_to_process_ids = sections_to_process_ids[:args.limit]
+
+            # Convert IDs back to strings for the analysis function if needed, or pass IDs
+            sections_to_process = [str(sid) for sid in sections_to_process_ids]
+
+
+        if not sections_to_process:
+            logger.info("No sections found to process based on current criteria.")
+            # No need to exit here, just let the loop below handle the empty list
+            # sys.exit(0) # Remove this exit
+
+        logger.info(f"Starting analysis for {len(sections_to_process)} sections...")
+
+        # --- Analysis Loop ---
+        summary_stats = {
+            "processed": 0,
+            "saved": 0,
+            "no_impact": 0, # Sections where analysis returned all nulls
+            "errors": 0
+        }
+
+        # Use tqdm for progress bar
+        for section_id_or_num in tqdm(sections_to_process, desc="Analyzing Sections"):
+            try:
+                analysis_result = analyze_entire_section(
+                    llm_chain_executor,
+                    exemption_prompt_template_content,
+                    section_id_or_num # Pass identifier
+                )
+
+                if analysis_result:
+                     saved, is_null = save_analysis_results(
+                         db,
+                         analysis_result["section_summary"],
+                         analysis_result["exemptions_analysis"]
+                     )
+                     summary_stats["processed"] += 1
+                     if saved:
+                         summary_stats["saved"] += 1
+                         if is_null:
+                             summary_stats["no_impact"] += 1
+                     else:
+                         summary_stats["errors"] += 1
+                else:
+                     # Should not happen if analyze_entire_section raises ValueError
+                     logger.warning(f"analyze_entire_section returned None for {section_id_or_num}, expected exception.")
+                     summary_stats["errors"] += 1
+
+
+            except ValueError as ve: # Catch errors from analyze_entire_section (e.g., DB fetch fail)
+                logger.error(f"Analysis failed for section {section_id_or_num}: {ve}")
+                summary_stats["errors"] += 1
+            except Exception as e: # Catch unexpected errors during the loop
+                logger.error(f"Unexpected error processing section {section_id_or_num}: {e}", exc_info=True)
+                summary_stats["errors"] += 1
+                # Optional: Decide whether to break the loop on unexpected errors
+                # break
+
+    finally:
+        # --- Cleanup and Summary ---
+        if db: # Ensure db exists before trying to close
+            db.close()
+            logger.debug("Database session closed.")
+            
+        logger.info("--- Analysis Complete ---")
+        logger.info(f"Total sections targeted: {len(sections_to_process)}")
+        logger.info(f"Sections processed: {summary_stats['processed']}")
+        logger.info(f"Results saved successfully: {summary_stats['saved']}")
+        logger.info(f"Sections with no discernible impact (all nulls): {summary_stats['no_impact']}")
+        logger.info(f"Sections with errors during analysis or saving: {summary_stats['errors']}")
+        logger.info("-------------------------") 
