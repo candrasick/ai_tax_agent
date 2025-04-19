@@ -1,6 +1,7 @@
 import logging
 import json
 from decimal import Decimal
+from typing import Optional
 
 from langchain.tools import Tool
 
@@ -27,14 +28,19 @@ def decimal_default_for_tool(obj):
         return float(obj)
     raise TypeError(f"Object of type {obj.__class__.__name__} is not JSON serializable")
 
-def get_current_simplification_state() -> str:
+def get_current_simplification_state(dummy_input: Optional[str] = None) -> str:
     """
     Retrieves the current overall state of the tax simplification process,
     including version numbers, text lengths (original, current, target),
     and revenue neutrality metrics (target, current estimate, deviation).
     This provides the necessary 'ledger' context for decision-making.
     Returns the state summary as a JSON string.
+    (Accepts an optional dummy input argument to be compatible with agent frameworks that might pass one unexpectedly).
     """
+    # Log if input is received, but don't use it
+    if dummy_input is not None:
+        logger.debug(f"Received dummy input in get_current_simplification_state: '{dummy_input}' - ignoring.")
+
     logger.info("Retrieving current tax simplification state.")
     try:
         # Instantiate the state tracker - use default reduction target for now,

@@ -24,110 +24,6 @@ from ai_tax_agent.database.models import (
 logger = logging.getLogger(__name__)
 
 
-def get_section_stats(section_identifier: str) -> str:
-    """Fetches and aggregates statistics for form fields linked to a US Code section.
-
-    Args:
-        section_identifier: The identifier of the US Code section (e.g., '162' or the primary key ID).
-
-    Returns:
-        A string summarizing the aggregated statistics or an error message.
-    """
-    db: Session = get_session()
-    if not db:
-        return "Error: Could not get database session."
-
-    section_id_int: int | None = None
-
-    # Try converting identifier to int (if it's a PK)
-    try:
-        section_id_int = int(section_identifier)
-        logger.debug(f"Interpreted section identifier '{section_identifier}' as primary key ID.")
-        section = db.query(UsCodeSection).filter(UsCodeSection.id == section_id_int).first()
-        if not section:
-             logger.warning(f"No section found with ID: {section_id_int}")
-             # Fallback: Try searching by section number if ID fails
-             section_id_int = None # Reset to try searching by number string
-
-    except ValueError:
-        logger.debug(f"Section identifier '{section_identifier}' is not an integer ID, searching by section number.")
-        # Identifier is likely a section number string (e.g., "162(a)")
-
-    if section_id_int is None:
-        # Search by section number string (case-insensitive exact match for simplicity first)
-        section = db.query(UsCodeSection).filter(sql_func.lower(UsCodeSection.section_number) == section_identifier.lower()).first()
-        if section:
-            section_id_int = section.id
-            logger.debug(f"Found section ID {section_id_int} for section number '{section_identifier}'.")
-        else:
-             logger.warning(f"No section found matching identifier: '{section_identifier}'.")
-             db.close()
-             return f"Error: Could not find a US Code section matching identifier '{section_identifier}'."
-
-    try:
-        # Find linked form field IDs
-        linked_field_ids_query = (
-            db.query(FormFieldUsCodeSectionLink.form_field_id)
-            .filter(FormFieldUsCodeSectionLink.us_code_section_id == section_id_int)
-        )
-        linked_field_ids = [item[0] for item in linked_field_ids_query.all()]
-
-        if not linked_field_ids:
-            db.close()
-            return f"Section '{section_identifier}' (ID: {section_id_int}) found, but no form fields are linked to it in the database."
-
-        logger.info(f"Found {len(linked_field_ids)} form fields linked to section ID {section_id_int}.")
-
-        # Aggregate statistics for these fields
-        # Using coalesce to handle potential NULLs in sum, defaulting to 0
-        stats_query = (
-            db.query(
-                sql_func.sum(sql_func.coalesce(FormFieldStatistics.dollars, 0)).label("total_dollars"),
-                sql_func.sum(sql_func.coalesce(FormFieldStatistics.forms, 0)).label("total_forms"),
-                sql_func.sum(sql_func.coalesce(FormFieldStatistics.people, 0)).label("total_people")
-            )
-            .filter(FormFieldStatistics.form_field_id.in_(linked_field_ids))
-        )
-
-        aggregated_stats: Dict[str, Any] | None = stats_query.first()._asdict() # type: ignore
-
-        if not aggregated_stats:
-             # This case should be unlikely if linked_field_ids is not empty, but handle it.
-             logger.warning(f"Query returned no stats for linked fields: {linked_field_ids}")
-             db.close()
-             return f"Found {len(linked_field_ids)} linked fields for section '{section_identifier}' but could not aggregate statistics."
-
-        # Format results
-        # Ensure results are treated as Decimal or handle potential type issues
-        total_dollars = aggregated_stats.get("total_dollars", Decimal(0))
-        total_forms = aggregated_stats.get("total_forms", Decimal(0))
-        total_people = aggregated_stats.get("total_people", Decimal(0))
-
-        # Convert Decimals to int/float for cleaner output if they are whole numbers
-        total_dollars_str = f"{total_dollars:,.0f}" if total_dollars is not None else "N/A"
-        total_forms_str = f"{total_forms:,.0f}" if total_forms is not None else "N/A"
-        total_people_str = f"{total_people:,.0f}" if total_people is not None else "N/A"
-
-        result_str = (
-            f"Statistics for Section '{section_identifier}' (ID: {section_id_int}):\n"
-            f"- Based on {len(linked_field_ids)} linked form field(s).\n"
-            f"- Total Dollars: {total_dollars_str}\n"
-            f"- Total Forms: {total_forms_str}\n"
-            f"- Total People: {total_people_str}"
-        )
-
-        logger.info(f"Successfully aggregated stats for section {section_id_int}.")
-        return result_str
-
-    except Exception as e:
-        logger.error(f"Error fetching stats for section ID {section_id_int}: {e}", exc_info=True)
-        return f"Error: An unexpected error occurred while fetching statistics for section '{section_identifier}'."
-    finally:
-        db.close()
-
-
-# --- New Detailed Stats Function ---
-
 def get_section_details_and_stats(section_identifier: str) -> Dict[str, Any] | str:
     """Fetches detailed info, core text, exemptions, and aggregated stats for a US Code section.
 
@@ -382,4 +278,37 @@ if __name__ == '__main__':
     print(f"--- Testing Detailed Stats with Section ID: {test_exempt_only} (May have exemptions only) ---")
     result_exempt = get_section_details_and_stats(test_exempt_only)
     print(json.dumps(result_exempt, indent=2) if isinstance(result_exempt, dict) else result_exempt) # Pretty print JSON
-    print("-"*50) 
+    print("-"*50)
+
+    # --- Test Block ---
+    import logging
+    from pprint import pprint # For readable output
+
+    # Configure logging for standalone testing
+    logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+
+    test_identifier_str = '1' # The input the agent likely used
+    test_identifier_int = 1   # Let's also test with an integer
+
+    print(f"\n--- Testing get_section_details_and_stats with identifier: '{test_identifier_str}' ---")
+    try:
+        result_str = get_section_details_and_stats(test_identifier_str)
+        print("--- Result (as string): ---")
+        # The function returns a string (likely JSON), so just print it
+        # If it's meant to return a dict/object, we'd pprint result_str directly after potential json.loads
+        print(result_str)
+    except Exception as e:
+        logger.error(f"Error calling with '{test_identifier_str}': {e}", exc_info=True)
+        print(f"Error calling with '{test_identifier_str}': {e}")
+
+    # Optional: Test with integer if relevant to implementation
+    # print(f"\n--- Testing get_section_details_and_stats with identifier: {test_identifier_int} ---")
+    # try:
+    #     result_int = get_section_details_and_stats(test_identifier_int)
+    #     print("--- Result (as string): ---")
+    #     print(result_int)
+    # except Exception as e:
+    #     logger.error(f"Error calling with {test_identifier_int}: {e}", exc_info=True)
+    #     print(f"Error calling with {test_identifier_int}: {e}")
+
+    print("\n--- Test Complete ---") 
