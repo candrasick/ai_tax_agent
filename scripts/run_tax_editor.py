@@ -6,14 +6,26 @@ import os
 import sys
 from decimal import Decimal
 from typing import Optional
+import warnings
 
 # Setup project path
 project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
+# Suppress the specific deprecation warning from langchain_google_genai
+warnings.filterwarnings(
+    "ignore",
+    category=UserWarning,
+    message=".*Convert_system_message_to_human will be deprecated!.*",
+    module="langchain_google_genai.*" # Target the specific module
+)
+
 from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import desc # For ordering
+
+# Progress bar import
+from tqdm import tqdm
 
 # Database imports
 from ai_tax_agent.database.session import get_session
@@ -71,7 +83,8 @@ def process_sections(limit: int | None = None, clear: bool = False):
 
         # --- Create Agent ---
         logger.info("Creating Tax Editor Agent...")
-        agent_executor = create_tax_editor_agent(verbose=True) # Configure as needed
+        # Set verbose=False to reduce agent output
+        agent_executor = create_tax_editor_agent(llm_model_name = "gemini-1.5-pro", verbose=False)
         if not agent_executor:
             logger.error("Failed to create Tax Editor Agent.")
             return
@@ -98,8 +111,15 @@ def process_sections(limit: int | None = None, clear: bool = False):
 
         # --- Processing Loop ---
         processed_count = 0
-        for section in sections_to_process:
-            logger.info(f"--- Processing Section ID: {section.id} ({section.section_number}) ---")
+        # Disable tqdm progress bar if quiet mode is enabled
+        # Need to check if 'args' exists in locals() in case process_sections is called programmatically elsewhere
+        disable_tqdm = locals().get('args') and locals().get('args').quiet
+        # Wrap the loop with tqdm for a progress bar
+        for section in tqdm(sections_to_process, desc="Processing Sections", unit="section", disable=disable_tqdm):
+            # Reduce logging noise inside the loop, especially in non-quiet mode
+            # Keep minimal INFO log even in normal mode, suppress in quiet
+            if not disable_tqdm:
+                 logger.info(f"Processing Section ID: {section.id} ({section.section_number})")
             try:
                 # 1. Get Input Text (from prior version)
                 # Fetch text directly based on prior_version
@@ -254,11 +274,21 @@ if __name__ == "__main__":
         action='store_true',
         help="Clear existing edits for the current working version before starting."
     )
+    parser.add_argument(
+        "--quiet",
+        action='store_true',
+        help="Suppress INFO and DEBUG log messages, showing only WARNINGs and errors."
+    )
 
     args = parser.parse_args()
 
     logger.info("Starting Tax Editor Agent run...")
-    logger.info(f"Arguments: limit={args.limit}, clear={args.clear}")
+    logger.info(f"Arguments: limit={args.limit}, clear={args.clear}, quiet={args.quiet}")
+
+    # Adjust logging level if --quiet is specified
+    if args.quiet:
+        print("Quiet mode enabled. Suppressing INFO and DEBUG messages.") # Still print this one confirmation
+        logging.getLogger().setLevel(logging.WARNING) # Set root logger level
 
     process_sections(limit=args.limit, clear=args.clear)
 

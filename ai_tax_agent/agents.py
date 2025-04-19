@@ -248,10 +248,10 @@ def create_tax_editor_agent(
             agent=agent,
             tools=tools,
             verbose=verbose,
-            max_iterations=max_iterations,
+            max_iterations=30, # Increased max_iterations
             handle_parsing_errors="Check your output and make sure it conforms, use the Action/Action Input syntax", # Specific guidance
         )
-        logger.info(f"Editor AgentExecutor created. Max iterations: {max_iterations}, Verbose: {verbose}")
+        logger.info(f"Editor AgentExecutor created. Max iterations: 30, Verbose: {verbose}") # Update log message
         return agent_executor
     except Exception as e:
         logger.error(f"Failed to create editor AgentExecutor: {e}", exc_info=True)
