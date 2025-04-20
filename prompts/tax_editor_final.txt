@@ -11,55 +11,78 @@ RESPONSE FORMAT INSTRUCTIONS:
 Use the following format:
 
 Input Data: the input data about the tax section you must analyze
-Thought: You should always think about what to do. Analyze the input data, consider the project state (use the state tool if needed), and the overall goal of simplification and revenue neutrality. Decide on an action (`simplify`, `redraft`, `delete`, `keep`).
-    - If the action is `simplify` or `redraft`, plan to use the appropriate generation tool (`Simplify Section Text` or `Redraft Section Text`) and the `Estimate Text Complexity` tool on the result.
-    - If the action is `keep` or `delete`, plan to use the `Estimate Text Complexity` tool on the *original* text (if relevant) and then proceed directly to formulating the Final Answer JSON. Do NOT attempt to call a tool named 'keep' or 'delete'.
+Thought: You should always think about what to do. First, consider using the semantic search tool to find similar sections that might be candidates for merging. Then analyze the input data, consider the project state, and the overall goal of simplification and revenue neutrality. Decide on an action (`simplify`, `redraft`, `merge`, `delete`, `keep`).
+    - If the action is `simplify` or `redraft`, plan to use the appropriate generation tool and the `Estimate Text Complexity` tool on the result.
+    - If the action is `merge`, first use the semantic search tool to confirm similarity, then use the `Merge Sections Text` tool followed by `Estimate Text Complexity`.
+    - If the action is `keep` or `delete`, use the `Estimate Text Complexity` tool on the *original* text (if relevant) and proceed to Final Answer JSON.
 Action: The action to take, *only* if using a tool (should be one of [{tool_names}]).
 Action Input: The input to the action.
 Observation: The result of the action.
 ... (this Thought/Action/Action Input/Observation sequence can repeat N times if using tools)
-Thought: I have gathered all necessary information (including tool results if applicable) and made my decision. I will now format the final response as a JSON object according to the specified structure.
+Thought: I have gathered all necessary information and made my decision. I will now format the final response as a JSON object.
 Final Answer: The final answer is a single JSON object conforming to the specified structure below.
 
 TASK GUIDELINES:
 ----------------
 Your task for each section provided in 'Input Data':
 
-1.  **Analyze:** Read the core text, associated metrics, and exemptions provided.
-2.  **Reason:** Decide which action is most appropriate: `simplify`, `redraft`, `delete`, or `keep`.
+1.  **Analyze and Search:**
+    - Read the core text, associated metrics, and exemptions provided
+    - Use semantic search to find similar sections (potential merge candidates)
+    - Consider sections with similar topics, overlapping content, or complementary rules
+
+2.  **Reason:** Decide which action is most appropriate:
+    - `simplify`: Minor rewording for clarity
+    - `redraft`: Major restructuring needed
+    - `merge`: Combine with another section (requires similarity evidence)
+    - `delete`: Remove redundant/obsolete content
+    - `keep`: Maintain as is
+
 3.  **Act (using tools if necessary):**
     *   **If action is `simplify` or `redraft`:**
-        *   Generate the revised text using the appropriate tool (`Simplify Section Text` or `Redraft Section Text`).
-        *   Estimate the `new_complexity_score` of the *revised* text using the `Estimate Text Complexity` tool.
-        *   Set `estimated_kept_dollars` based on original impact; `estimated_deleted_dollars` is null.
-    *   **If action is `keep`:**
-        *   Optionally estimate the `new_complexity_score` of the *original* text using the `Estimate Text Complexity` tool.
-        *   Set `estimated_kept_dollars` based on original impact; `estimated_deleted_dollars` is null. `after_text` is null.
-    *   **If action is `delete`:**
-        *   Set `estimated_deleted_dollars` based on original impact; `estimated_kept_dollars` is null. `after_text` is null. `new_complexity_score` is null.
-4.  **Ledger Awareness:**
-    *   Be aware of the project ledger state (use `Get Current Simplification State` tool if needed).
-    *   Aim to reduce text length towards the target while keeping cumulative revenue deviation low.
-    *   Minor revenue shifts from closing loopholes/modernizing are acceptable if reasoned.
+        *   Generate revised text using appropriate tool
+        *   Estimate new complexity score
+        *   Set `estimated_kept_dollars` based on original impact
+    *   **If action is `merge`:**
+        *   Use semantic search to identify and confirm merge candidate
+        *   Use `Merge Sections Text` tool to combine sections
+        *   Estimate new complexity score
+        *   Set `estimated_kept_dollars` as sum of both sections
+        *   Set `merged_section_id` to the ID of the section being merged in
+    *   **If action is `keep` or `delete`:**
+        *   Follow previous guidelines
 
-FINAL OUTPUT JSON STRUCTURE (Provide this in 'Final Answer'):
--------------------------------------------------------------
+4.  **Ledger Awareness:**
+    *   Track cumulative impact on revenue
+    *   Consider complexity reduction goals
+    *   Monitor overall text length reduction
+
+FINAL OUTPUT JSON STRUCTURE:
+---------------------------
 ```json
 {{
-  "action": "simplify" | "redraft" | "delete" | "keep",
+  "action": "simplify" | "redraft" | "merge" | "delete" | "keep",
   "rationale": "string",
   "after_text": "string|null",
   "estimated_deleted_dollars": float|null,
   "estimated_kept_dollars": float|null,
-  "new_complexity_score": float|null
+  "new_complexity_score": float|null,
+  "merged_section_id": integer|null
 }}
 ```
 
 IMPORTANT NOTES:
 ---------------
-*   The `after_text` in the JSON should be the result from the simplify/redraft tool, or null if the action is keep/delete.
-*   You must complete your decision for every section.
-*   The final output MUST be only the JSON object in the `Final Answer:` section.
+*   For `merge` actions:
+    - Must provide evidence of similarity from semantic search
+    - Set `merged_section_id` to the section being merged in
+    - Ensure merged text preserves all essential content
+*   The `after_text` should be:
+    - Result from simplify/redraft tool
+    - Result from merge tool (if merging)
+    - null if action is keep/delete
+*   Complete your decision for every section
+*   Final output MUST be only the JSON object
 
 BEGIN!
 -------

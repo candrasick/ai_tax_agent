@@ -22,6 +22,7 @@ logger = logging.getLogger(__name__)
 DEFAULT_CHROMA_PATH_STR = os.path.join(PROJECT_ROOT, "chroma_data")
 CBO_COLLECTION_NAME = "cbo_revenue_projections"
 FORM_INSTRUCTIONS_COLLECTION_NAME = "form_instructions"
+TAX_CODE_COLLECTION_NAME = "us_code_sections"
 
 def _get_chroma_collection(collection_name: str, persist_directory: str = DEFAULT_CHROMA_PATH_STR) -> Collection | None:
     """Helper function to get a specific ChromaDB collection, associating the embedding function."""
@@ -151,6 +152,62 @@ def query_form_instructions(query_text: str, n_results: int = 3) -> str:
         logger.error(f"Error querying ChromaDB collection '{FORM_INSTRUCTIONS_COLLECTION_NAME}': {e}", exc_info=True)
         return f"Error: An unexpected error occurred while querying Form Instructions."
 
+def query_similar_sections(query_text: str, n_results: int = 5) -> str:
+    """Queries the Tax Code Sections ChromaDB collection for semantically similar sections.
+
+    Args:
+        query_text: The text query to search for (typically a section's text).
+        n_results: The number of similar sections to return.
+
+    Returns:
+        A formatted string containing the query results, or an error message.
+    """
+    logger.info(f"Querying Tax Code Sections collection for similar sections to: '{query_text[:100]}...' (n_results={n_results})")
+
+    collection = _get_chroma_collection(TAX_CODE_COLLECTION_NAME)
+    if not collection:
+        return f"Error: Could not access the ChromaDB collection '{TAX_CODE_COLLECTION_NAME}'."
+
+    try:
+        results = collection.query(
+            query_texts=[query_text],
+            n_results=n_results,
+            include=['documents', 'metadatas', 'distances']
+        )
+
+        if not results or not results.get('ids') or not results['ids'][0]:
+            return f"No similar sections found for the given text."
+
+        # Format results
+        output_lines = [f"Found {len(results['ids'][0])} similar sections:"]
+        for i in range(len(results['ids'][0])):
+            doc_id = results['ids'][0][i]
+            distance = results['distances'][0][i]
+            metadata = results['metadatas'][0][i]
+            document = results['documents'][0][i]
+            
+            # Extract section number and title from metadata if available
+            section_info = f"Section {metadata.get('section_number', 'Unknown')}"
+            if 'title' in metadata:
+                section_info += f": {metadata['title']}"
+            
+            # Format the document snippet
+            doc_snippet = document[:300] + ("..." if len(document) > 300 else "")
+            
+            # Calculate similarity score (convert distance to similarity)
+            similarity = 1.0 / (1.0 + distance)  # Simple conversion, closer to 1 means more similar
+            
+            output_lines.append(f"\n--- Similar Section {i+1} (ID: {doc_id}, Similarity: {similarity:.2f}) ---")
+            output_lines.append(f"Section Info: {section_info}")
+            if 'version' in metadata:
+                output_lines.append(f"Version: {metadata['version']}")
+            output_lines.append(f"Document Snippet: {doc_snippet}")
+
+        return "\n".join(output_lines)
+
+    except Exception as e:
+        logger.error(f"Error querying ChromaDB collection '{TAX_CODE_COLLECTION_NAME}': {e}", exc_info=True)
+        return f"Error: An unexpected error occurred while querying similar sections."
 
 # Example Usage (Optional)
 if __name__ == '__main__':
@@ -165,4 +222,9 @@ if __name__ == '__main__':
     test_query_instr = "deduction for medical expenses"
     print(f"--- Testing Form Instructions Query: '{test_query_instr}' ---")
     print(query_form_instructions(test_query_instr))
+    print("-"*50)
+
+    test_query_section = "There shall be allowed as a deduction all the ordinary and necessary expenses paid or incurred during the taxable year in carrying on any trade or business"
+    print(f"--- Testing Similar Sections Query ---")
+    print(query_similar_sections(test_query_section))
     print("-"*50) 

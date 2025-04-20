@@ -5,7 +5,7 @@ import json
 import os
 import sys
 from decimal import Decimal
-from typing import Optional
+from typing import Optional, Tuple
 import warnings
 import re # Add import for regex
 
@@ -65,332 +65,411 @@ def clear_working_version_edits(db: Session, working_version: int):
         raise
 
 
-def process_sections(limit: int | None = None, clear: bool = False):
-    """
-    Iteratively processes tax sections using the tax editor agent.
-
-    Args:
-        limit: Maximum number of sections to process in this run.
-        clear: Whether to clear existing progress for the current working version.
-    """
-    # Initial setup (versions, agent) - No DB session needed yet
-    prior_version, working_version = determine_version_numbers()
-    logger.info(f"Determined versions: Prior={prior_version}, Working={working_version}")
-
-    if working_version == 0:
-        logger.error("Working version is 0. Cannot run editor agent without an initial version.")
-        return
-
-    # --- Optional: Clear previous edits in its own session ---
-    if clear:
-        temp_db: Session | None = None
-        try:
-            temp_db = get_session()
-            if not temp_db:
-                logger.error("Failed to get database session for clearing edits.")
-                return # Or handle error appropriately
-            clear_working_version_edits(temp_db, working_version)
-            # Re-determine versions might be needed if clearing changes things fundamentally
-            # prior_version, working_version = determine_version_numbers()
-        except Exception as clear_e:
-            logger.error(f"Error during clearing of version {working_version}: {clear_e}", exc_info=True)
-            # Decide if we should stop or continue if clearing fails
-            return # Stop for now if clearing fails
-        finally:
-            if temp_db:
-                temp_db.close()
-
-    # --- Create Agent (outside loop) ---
-    logger.info("Creating Tax Editor Agent...")
-    agent_executor = create_tax_editor_agent(llm_model_name="gemini-1.5-pro", verbose=False)
-    if not agent_executor:
-        logger.error("Failed to create Tax Editor Agent.")
-        return
-    logger.info("Tax Editor Agent created successfully.")
-
-    # --- Identify Sections to Process (using a temporary session) ---
-    sections_to_process = []
-    temp_db: Session | None = None
-    try:
-        temp_db = get_session()
-        if not temp_db:
-            logger.error("Failed to get database session for identifying sections.")
-            return
-
-        # First, get all sections that were deleted in any prior version
-        deleted_sections = temp_db.query(UsCodeSectionRevised.orig_section_id)\
-            .filter(UsCodeSectionRevised.deleted == True)\
-            .filter(UsCodeSectionRevised.version < working_version)\
-            .distinct()
-
-        # Exclude both already processed sections in current version AND previously deleted sections
-        subquery = temp_db.query(UsCodeSectionRevised.orig_section_id)\
-            .filter(UsCodeSectionRevised.version == working_version)
+def get_section_history(session: Session, section_id: int) -> str:
+    """Get formatted history string for a section."""
+    history_entries = session.query(SectionHistory).filter(
+        SectionHistory.orig_section_id == section_id
+    ).order_by(SectionHistory.version_changed).all()
+    
+    if not history_entries:
+        return "No previous changes"
         
-        query = temp_db.query(UsCodeSection)\
-            .filter(UsCodeSection.id.notin_(subquery))\
-            .filter(UsCodeSection.id.notin_(deleted_sections))\
-            .order_by(UsCodeSection.section_number)
+    history_lines = []
+    for entry in history_entries:
+        history_lines.append(
+            f"Version {entry.version_changed}: {entry.action.capitalize()} - {entry.rationale}"
+        )
+    
+    return "\n".join(history_lines)
+
+
+def prepare_editor_input(
+    section_id: int,
+    prior_version: int,
+    prior_version_text: str,
+    prior_version_impact: Optional[float],
+    prior_version_complexity: Optional[float],
+    related_exemptions: str,
+    history: str
+) -> dict:
+    """Prepare input for the tax editor agent."""
+    return {
+        "section_id": section_id,
+        "prior_version": prior_version,
+        "prior_version_text": prior_version_text,
+        "prior_version_impact": prior_version_impact if prior_version_impact is not None else "Unknown",
+        "prior_version_complexity": prior_version_complexity if prior_version_complexity is not None else "Unknown",
+        "related_exemptions": related_exemptions,
+        "history": history
+    }
+
+
+def process_sections(session: Session, version: int, limit: Optional[int] = None) -> None:
+    """Process sections for the given version number."""
+    try:
+        # Get sections to process - exclude those marked as deleted in UsCodeSectionRevised
+        sections_query = session.query(UsCodeSection).filter(
+            ~UsCodeSection.id.in_(
+                session.query(UsCodeSectionRevised.orig_section_id).filter(
+                    UsCodeSectionRevised.deleted == True
+                )
+            )
+        ).options(
+            joinedload(UsCodeSection.impact_assessment),
+            joinedload(UsCodeSection.complexity_assessment)
+        )
+        
+        if limit:
+            sections_query = sections_query.limit(limit)
             
-        if limit is not None and limit > 0:
-            query = query.limit(limit)
-        sections_to_process = query.all()
-    except Exception as query_e:
-        logger.error(f"Failed to query sections to process: {query_e}", exc_info=True)
-        return # Cannot proceed without sections
-    finally:
-        if temp_db:
-            temp_db.close()
-
-    if not sections_to_process:
-        logger.info(f"No sections found needing processing for version {working_version}.")
-        return
-
-    logger.info(f"Found {len(sections_to_process)} sections to process (limit={limit}).")
-
-    # --- Processing Loop (Each section gets its own session) ---
-    processed_count = 0
-    disable_tqdm = locals().get('args') and locals().get('args').quiet
-
-    for section in tqdm(sections_to_process, desc="Processing Sections", unit="section", disable=disable_tqdm):
-        db: Session | None = None # Session defined inside the loop
-        try:
-            # Create session for this section
-            db = get_session()
-            if not db:
-                 logger.error(f"Failed to get database session for section {section.id}. Skipping.")
-                 continue
-
-            if not disable_tqdm:
-                 logger.info(f"Processing Section ID: {section.id} ({section.section_number}) with session {db}")
-
-            # 1. Get Input Text (from prior version)
-            input_text: Optional[str] = None
-            if prior_version == 0:
-                original_section = db.query(UsCodeSection.core_text).filter(UsCodeSection.id == section.id).scalar()
-                input_text = original_section
-                logger.debug(f"Fetched original text (v0) for section {section.id}. Length: {len(input_text) if input_text else 0}")
-            elif prior_version > 0:
-                revised_section_text = db.query(UsCodeSectionRevised.core_text)\
-                                         .filter(UsCodeSectionRevised.orig_section_id == section.id,
-                                                 UsCodeSectionRevised.version == prior_version)\
-                                         .scalar()
-                input_text = revised_section_text
-                logger.debug(f"Fetched revised text (v{prior_version}) for section {section.id}. Length: {len(input_text) if input_text else 0}")
-
-            if input_text is None:
-                 logger.warning(f"Could not find text for prior version {prior_version} for section {section.id}. Skipping.")
-                 continue
-
-            # 2. Get Additional Context
-            impact = None
-            revenue_impact_str = "N/A"
-            
-            if prior_version == 0:
-                # For version 0, get original impact from SectionImpact table
-                impact = db.query(SectionImpact).filter(SectionImpact.section_id == section.id).first()
-                revenue_impact_str = f"{impact.revenue_impact / 1_000_000:.1f}" if impact and impact.revenue_impact is not None else "N/A"
-            else:
-                # For versions > 0, get revised impact from prior version
-                prior_revision = db.query(UsCodeSectionRevised)\
-                    .filter(UsCodeSectionRevised.orig_section_id == section.id)\
-                    .filter(UsCodeSectionRevised.version == prior_version)\
-                    .first()
-                if prior_revision and prior_revision.revised_financial_impact is not None:
-                    revenue_impact_str = f"{prior_revision.revised_financial_impact / 1_000_000:.1f}"
-                    
-            # Get current complexity score from the most recent version
-            current_complexity_score = "N/A"
-            if prior_version > 0:
-                prior_revision = db.query(UsCodeSectionRevised)\
-                    .filter(UsCodeSectionRevised.orig_section_id == section.id)\
-                    .filter(UsCodeSectionRevised.version == prior_version)\
-                    .first()
-                if prior_revision and prior_revision.revised_complexity is not None:
-                    current_complexity_score = f"{prior_revision.revised_complexity:.2f}"
-            else:
-                # For version 0, we might want to get the original complexity if it exists
-                # This depends on your data model - adjust if needed
-                impact = impact or db.query(SectionImpact).filter(SectionImpact.section_id == section.id).first()
-                if impact and hasattr(impact, 'complexity_score') and impact.complexity_score is not None:
-                    current_complexity_score = f"{impact.complexity_score:.2f}"
-
-            # Get related exemptions only for version 0 (original text)
-            related_exemptions_str = "N/A"
-            if prior_version == 0:
-                exemptions = db.query(Exemption)\
-                    .filter(Exemption.section_id == section.id)\
-                    .all()
-                
-                # Format exemptions information
-                if exemptions:
-                    exemptions_info = []
-                    for e in exemptions:
-                        impact = f"${e.revenue_impact_estimate/1000:.1f}M" if e.revenue_impact_estimate else "N/A"
-                        entities = f"{e.entity_impact:,.0f}" if e.entity_impact else "N/A"
-                        text = e.relevant_text[:100] + "..." if e.relevant_text and len(e.relevant_text) > 100 else e.relevant_text or "N/A"
-                        exemptions_info.append(f"Text: {text}, Impact: {impact}, Entities: {entities}")
-                    related_exemptions_str = "\n- " + "\n- ".join(exemptions_info)
-
-            # 3. Construct Agent Input String
-            relevant_text_input = f"""
-            Section ID: {section.section_number} (DB ID: {section.id})
-            Original Text (Version {prior_version}): {input_text}
-            Complexity Score (Current): {current_complexity_score}
-            Revenue Impact ($M): {revenue_impact_str}
-            Related Exemptions: {related_exemptions_str}
-            """
-
-            # 4. Invoke Agent
-            logger.debug(f"Invoking agent with input:\\n{relevant_text_input}")
-            response = agent_executor.invoke({"relevant_text": relevant_text_input})
-            agent_output = response.get('output')
-            logger.debug(f"Agent raw output: {agent_output}")
-
-            if not agent_output:
-                logger.error(f"Agent did not return 'output' for section {section.id}. Skipping.")
-                continue
-
-            # 5. Parse Agent Output
-            parsed_output: Optional[TaxEditorOutput] = None
+        sections = sections_query.all()
+        logger.info(f"Processing {len(sections)} sections for version {version}")
+        
+        for section in sections:
             try:
-                # Use regex to find the first JSON object within the output string
-                agent_output_str = str(agent_output).strip()
-                # Use non-greedy matching (.*?) to find the *shortest* block
-                match = re.search(r'\{.*?\}', agent_output_str, re.DOTALL)
+                # Get prior version info
+                prior_version = version - 1
+                
+                # First check if there's a prior revision
+                prior_revision = session.query(UsCodeSectionRevised).filter(
+                    UsCodeSectionRevised.orig_section_id == section.id,
+                    UsCodeSectionRevised.version == prior_version,
+                    UsCodeSectionRevised.deleted == False
+                ).first()
+                
+                if prior_revision:
+                    prior_version_text = prior_revision.core_text if prior_revision.core_text else "No text available"
+                    prior_version_impact = prior_revision.revised_financial_impact
+                    prior_version_complexity = prior_revision.revised_complexity
+                else:
+                    # Fall back to original section and relationships
+                    prior_version_text = section.core_text if section.core_text else "No text available"
+                    prior_version_impact = section.impact_assessment.revenue_impact if section.impact_assessment else None
+                    prior_version_complexity = section.complexity_assessment.complexity_score if section.complexity_assessment else None
+                
+                # Only get exemptions for version 0
+                if prior_version == 0:
+                    # Get related exemptions
+                    exemptions = session.query(Exemption).filter_by(section_id=section.id).all()
+                    related_exemptions_str = format_exemptions(exemptions)
+                else:
+                    related_exemptions_str = "N/A"
 
-                if not match:
-                    raise ValueError("No valid JSON object found in agent output.")
-
-                potential_json_str = match.group(0)
-
-                # First, try parsing the string with standard json library
-                try:
-                    data_dict = json.loads(potential_json_str)
-                except json.JSONDecodeError as json_e:
-                    logger.error(f"Failed to decode extracted JSON string for section {section.id}: {json_e}")
-                    logger.error(f"Extracted string was: {potential_json_str}")
-                    logger.error(f"Original raw output was: {agent_output}")
-                    continue # Skip if basic JSON parsing fails
-
-                # If JSON string is valid, validate with Pydantic model
-                try:
-                    parsed_output = TaxEditorOutput.model_validate(data_dict)
-                    logger.info(f"Agent decision for section {section.id}: {parsed_output.action}")
-                    logger.debug(f"Agent parsed result data: {parsed_output.model_dump()}")
-                except Exception as pydantic_e: # Catch Pydantic validation errors specifically
-                    logger.error(f"Pydantic validation failed for section {section.id}: {pydantic_e}")
-                    logger.error(f"Data dictionary passed to Pydantic was: {data_dict}")
-                    logger.error(f"Original raw output was: {agent_output}")
-                    continue # Skip if Pydantic validation fails
-
-            except ValueError as ve:
-                logger.error(f"JSON extraction failed for section {section.id}: {ve}")
-                logger.error(f"Original raw output was: {agent_output}")
+                # Get section history
+                history = get_section_history(session, section.id)
+                
+                # Prepare input for editor
+                editor_input = prepare_editor_input(
+                    section_id=section.id,
+                    prior_version=prior_version,
+                    prior_version_text=prior_version_text,
+                    prior_version_impact=prior_version_impact,
+                    prior_version_complexity=prior_version_complexity,
+                    related_exemptions=related_exemptions_str,
+                    history=history
+                )
+                
+                # Get editor decision
+                editor_output = get_editor_decision(editor_input)
+                
+                # Process the decision
+                success, message = process_editor_decision(
+                    session=session,
+                    section_id=section.id,
+                    version=version,
+                    editor_output=editor_output,
+                    prior_version_text=prior_version_text,
+                    prior_version_impact=prior_version_impact,
+                    prior_version_complexity=prior_version_complexity,
+                    prior_version_exemptions=related_exemptions_str
+                )
+                
+                if success:
+                    session.commit()
+                    logger.info(f"Section {section.id}: {message}")
+                else:
+                    session.rollback()
+                    logger.error(f"Section {section.id}: {message}")
+                    
+            except Exception as e:
+                session.rollback()
+                logger.error(f"Error processing section {section.id}: {str(e)}")
                 continue
-            except Exception as e: # Catch other unexpected errors during extraction/parsing
-                 logger.error(f"An unexpected error occurred during parsing/extraction for section {section.id}: {e}", exc_info=True)
-                 logger.error(f"Original raw output was: {agent_output}")
-                 continue
+                
+        if limit:
+            logger.info(f"Reached processing limit of {limit}.")
+            
+    except Exception as e:
+        logger.error(f"Error in process_sections: {str(e)}")
+        raise
 
-            # Ensure parsed_output is not None before proceeding
-            if parsed_output is None:
-                logger.error(f"Skipping section {section.id} due to parsing/validation failure.")
-                continue
 
-            # 6. Persist Results to SectionVersion (within the loop's session)
-            action = parsed_output.action
-            is_deleted = (action == 'delete')
-            revised_text = parsed_output.after_text # Already Optional[str]
+def process_editor_decision(
+    session: Session,
+    section_id: int,
+    version: int,
+    editor_output: dict,
+    prior_version_text: str,
+    prior_version_impact: float,
+    prior_version_complexity: float,
+    prior_version_exemptions: str,
+) -> Tuple[bool, str]:
+    """Process the editor's decision for a section, updating the database accordingly.
+    
+    Returns:
+        Tuple[bool, str]: (success, message)
+    """
+    try:
+        action = editor_output["action"]
+        rationale = editor_output["rationale"]
+        after_text = editor_output.get("after_text")
+        estimated_deleted_dollars = editor_output.get("estimated_deleted_dollars")
+        estimated_kept_dollars = editor_output.get("estimated_kept_dollars")
+        new_complexity_score = editor_output.get("new_complexity_score")
+        merged_section_id = editor_output.get("merged_section_id")
 
-            new_version_record = UsCodeSectionRevised(
-                orig_section_id=section.id,
-                version=working_version,
-                deleted=is_deleted,
-                core_text=revised_text, # Use directly from parsed output
-                # Use the parsed float value directly, None if not present
-                revised_complexity = parsed_output.new_complexity_score, 
-                # Use the parsed Decimal values directly, handle None
-                revised_financial_impact = (
-                    parsed_output.estimated_kept_dollars if not is_deleted and parsed_output.estimated_kept_dollars is not None
-                    else parsed_output.estimated_deleted_dollars * -1 if is_deleted and parsed_output.estimated_deleted_dollars is not None
-                    else None # Explicitly handle case where neither is set or applicable
-                ),
-                # Replicate other relevant fields from original UsCodeSection
-                subtitle=section.subtitle,
-                chapter=section.chapter,
-                subchapter=section.subchapter,
-                part=section.part,
-                section_number=section.section_number,
-                section_title=section.section_title,
+        # Get the original section for its metadata
+        original_section = session.query(UsCodeSection).filter_by(id=section_id).first()
+        if not original_section:
+            return False, f"Original section {section_id} not found"
+
+        # Create history entry for the action
+        history_entry = SectionHistory(
+            orig_section_id=section_id,
+            version_changed=version,
+            action=action,
+            rationale=rationale
+        )
+        session.add(history_entry)
+
+        # Handle merge action
+        if action == "merge":
+            if not merged_section_id:
+                return False, "Merge action requires merged_section_id"
+                
+            # Get the section being merged in
+            merged_section = session.query(UsCodeSection).filter_by(id=merged_section_id).first()
+            if not merged_section:
+                return False, f"Section {merged_section_id} not found for merging"
+                
+            # Create revised section record for the deleted (merged) section
+            merged_section_revised = UsCodeSectionRevised(
+                orig_section_id=merged_section_id,
+                version=version,
+                deleted=True,
+                subtitle=merged_section.subtitle,
+                chapter=merged_section.chapter,
+                subchapter=merged_section.subchapter,
+                part=merged_section.part,
+                section_number=merged_section.section_number,
+                section_title=merged_section.section_title,
+                core_text=None,  # Text is now in the merged section
+                revised_complexity=0.0,  # Deleted sections have 0 complexity
+                revised_financial_impact=0  # Impact is counted in the merged section
             )
-
-            # --- Optional: Create SectionHistory record ---
-            history_record = SectionHistory(
-                 orig_section_id=section.id,
-                 version_changed=working_version,
-                 action=action, # Use action from parsed output
-                 rationale=parsed_output.rationale # Use rationale from parsed output
+            session.add(merged_section_revised)
+            
+            # Create revised section with merged content
+            revised = UsCodeSectionRevised(
+                orig_section_id=section_id,
+                version=version,
+                deleted=False,
+                subtitle=original_section.subtitle,
+                chapter=original_section.chapter,
+                subchapter=original_section.subchapter,
+                part=original_section.part,
+                section_number=original_section.section_number,
+                section_title=original_section.section_title,
+                core_text=after_text,
+                revised_complexity=new_complexity_score,
+                revised_financial_impact=estimated_kept_dollars
             )
-            db.add(history_record) # Add history record to the session
-            # -------------------------------------------
+            session.add(revised)
+            
+            return True, f"Successfully merged section {merged_section_id} into {section_id}"
 
-            db.add(new_version_record)
-            db.commit()
-            logger.info(f"Successfully saved edited version {working_version} for section {section.id}.")
-            processed_count += 1
+        # Handle simplify/redraft actions
+        if action in ["simplify", "redraft"]:
+            revised = UsCodeSectionRevised(
+                orig_section_id=section_id,
+                version=version,
+                deleted=False,
+                subtitle=original_section.subtitle,
+                chapter=original_section.chapter,
+                subchapter=original_section.subchapter,
+                part=original_section.part,
+                section_number=original_section.section_number,
+                section_title=original_section.section_title,
+                core_text=after_text,
+                revised_complexity=new_complexity_score,
+                revised_financial_impact=estimated_kept_dollars
+            )
+            session.add(revised)
+            
+            return True, f"Successfully {action}ed section {section_id}"
+            
+        elif action == "delete":
+            # Create a revised section record marked as deleted
+            revised = UsCodeSectionRevised(
+                orig_section_id=section_id,
+                version=version,
+                deleted=True,
+                subtitle=original_section.subtitle,
+                chapter=original_section.chapter,
+                subchapter=original_section.subchapter,
+                part=original_section.part,
+                section_number=original_section.section_number,
+                section_title=original_section.section_title,
+                core_text=None,  # Deleted sections have no text
+                revised_complexity=0.0,  # Deleted sections have 0 complexity
+                revised_financial_impact=estimated_deleted_dollars
+            )
+            session.add(revised)
+            
+            return True, f"Successfully deleted section {section_id}"
+            
+        elif action == "keep":
+            # Create a revised section record for the kept section
+            revised = UsCodeSectionRevised(
+                orig_section_id=section_id,
+                version=version,
+                deleted=False,
+                subtitle=original_section.subtitle,
+                chapter=original_section.chapter,
+                subchapter=original_section.subchapter,
+                part=original_section.part,
+                section_number=original_section.section_number,
+                section_title=original_section.section_title,
+                core_text=prior_version_text,  # Keep the same text
+                revised_complexity=prior_version_complexity,  # Keep the same complexity
+                revised_financial_impact=prior_version_impact  # Keep the same impact
+            )
+            session.add(revised)
+            
+            return True, f"Kept section {section_id} unchanged"
+            
+        else:
+            return False, f"Unknown action: {action}"
+            
+    except Exception as e:
+        return False, f"Error processing editor decision: {str(e)}"
 
-        except Exception as e:
-            logger.error(f"Failed processing section {section.id}: {e}", exc_info=True)
-            if db: # Rollback if session exists
-                try:
-                    db.rollback()
-                    logger.warning(f"Rolled back changes for section {section.id} due to error.")
-                except Exception as rb_e:
-                     logger.error(f"Error during rollback for section {section.id}: {rb_e}")
-            # Continue to the next section
-            continue
-        finally:
-            # Ensure session is closed for this section
-            if db:
-                db.close()
-                logger.debug(f"Closed session for section {section.id}")
 
-    logger.info(f"--- Run Finished ---")
-    logger.info(f"Successfully processed {processed_count} sections.")
-    if limit and processed_count == limit:
-         logger.info(f"Reached processing limit of {limit}.")
+def get_editor_decision(editor_input: dict) -> dict:
+    """Get the editor agent's decision for a section.
+    
+    Args:
+        editor_input: Dictionary containing section information
+        
+    Returns:
+        Dictionary containing the editor's decision
+    """
+    try:
+        # Create the editor agent
+        agent_executor = create_tax_editor_agent(llm_model_name="gemini-1.5-pro", verbose=True)  # Set verbose to True
+        if not agent_executor:
+            raise RuntimeError("Failed to create tax editor agent")
+            
+        # Format input for the agent
+        relevant_text = f"""
+        Section ID: {editor_input['section_id']}
+        Prior Version: {editor_input['prior_version']}
+        Original Text: {editor_input['prior_version_text']}
+        Complexity Score (Current): {editor_input['prior_version_complexity']}
+        Revenue Impact ($M): {editor_input['prior_version_impact']}
+        Related Exemptions: {editor_input['related_exemptions']}
+        History: {editor_input['history']}
+        """
+        
+        logger.info(f"Sending input to agent for section {editor_input['section_id']}:\n{relevant_text}")
+        
+        # Get agent's decision
+        response = agent_executor.invoke({
+            "relevant_text": relevant_text.strip(),
+            "agent_scratchpad": "",
+            "tools": "",  # These will be filled in by the agent framework
+            "tool_names": ""  # These will be filled in by the agent framework
+        })
+        
+        logger.info(f"Raw agent response:\n{response}")
+        agent_output = response.get('output')
+        
+        if not agent_output:
+            raise ValueError("Agent did not return 'output' key in response")
+            
+        logger.info(f"Agent output:\n{agent_output}")
+            
+        # Parse JSON from agent output
+        match = re.search(r'\{.*?\}', str(agent_output), re.DOTALL)
+        if not match:
+            raise ValueError("No valid JSON object found in agent output")
+            
+        potential_json_str = match.group(0)
+        logger.info(f"Extracted JSON:\n{potential_json_str}")
+        
+        editor_output = json.loads(potential_json_str)
+        logger.info(f"Parsed editor output:\n{json.dumps(editor_output, indent=2)}")
+        
+        # Validate required fields
+        required_fields = ["action", "rationale"]
+        for field in required_fields:
+            if field not in editor_output:
+                raise ValueError(f"Missing required field '{field}' in editor output")
+                
+        return editor_output
+        
+    except Exception as e:
+        logger.error(f"Error getting editor decision: {str(e)}")
+        # Return a safe default - keep the section unchanged
+        return {
+            "action": "keep",
+            "rationale": f"Error in editor agent processing: {str(e)}",
+            "after_text": None,
+            "estimated_deleted_dollars": None,
+            "estimated_kept_dollars": None,
+            "new_complexity_score": None,
+            "merged_section_id": None
+        }
+
+
+def main(limit: Optional[int] = None, clear: bool = False):
+    """
+    Main entry point for the tax editor script.
+    
+    Args:
+        limit: Optional limit on number of sections to process
+        clear: Whether to clear existing progress for the current working version
+    """
+    try:
+        # Initial setup
+        prior_version, working_version = determine_version_numbers()
+        logger.info(f"Determined versions: Prior={prior_version}, Working={working_version}")
+        
+        if working_version == 0:
+            logger.error("Working version is 0. Cannot run editor agent without an initial version.")
+            return
+            
+        # Clear previous edits if requested
+        if clear:
+            with get_session() as session:
+                clear_working_version_edits(session, working_version)
+                session.commit()
+                
+        # Process sections
+        with get_session() as session:
+            process_sections(session, working_version, limit)
+            
+    except Exception as e:
+        logger.error(f"Error in main: {str(e)}")
+        raise
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Run the Tax Editor Agent to process sections.")
-    parser.add_argument(
-        "--limit",
-        type=int,
-        default=None,
-        help="Maximum number of sections to process in this run."
-    )
-    parser.add_argument(
-        "--clear",
-        action='store_true',
-        help="Clear existing edits for the current working version before starting."
-    )
-    parser.add_argument(
-        "--quiet",
-        action='store_true',
-        help="Suppress INFO and DEBUG log messages, showing only WARNINGs and errors."
-    )
-
+    parser = argparse.ArgumentParser(description="Run the tax code editor agent")
+    parser.add_argument("--limit", type=int, help="Limit the number of sections to process")
+    parser.add_argument("--clear", action="store_true", help="Clear existing progress for the current working version")
     args = parser.parse_args()
-
-    logger.info("Starting Tax Editor Agent run...")
-    logger.info(f"Arguments: limit={args.limit}, clear={args.clear}, quiet={args.quiet}")
-
-    # Adjust logging level if --quiet is specified
-    if args.quiet:
-        print("Quiet mode enabled. Suppressing INFO and DEBUG messages.") # Still print this one confirmation
-        logging.getLogger().setLevel(logging.WARNING) # Set root logger level
-
-    process_sections(limit=args.limit, clear=args.clear)
+    
+    main(limit=args.limit, clear=args.clear)
 
     logger.info("Tax Editor Agent run complete.") 

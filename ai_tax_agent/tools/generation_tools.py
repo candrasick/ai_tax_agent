@@ -146,6 +146,81 @@ redraft_tool = Tool.from_function(
     args_schema=RedraftInput
 )
 
+# --- Merge Tool ---
+
+class MergeInput(BaseModel):
+    """Input schema for the merge_sections_text tool."""
+    primary_text: str = Field(description="The text of the primary section that will absorb the other.")
+    secondary_text: str = Field(description="The text of the section to be merged in.")
+    merge_rationale: str = Field(description="Brief explanation of why these sections are being merged.")
+
+def merge_sections_text(primary_text: str, secondary_text: str, merge_rationale: str, 
+                       model_name: str = "gemini-1.5-flash-latest", temperature: float = 0.2) -> str:
+    """
+    Combines two sections of tax code text into a single coherent section.
+    Preserves all essential legal/financial content while eliminating redundancy
+    and ensuring logical flow. Calls an LLM.
+
+    Args:
+        primary_text: The text of the primary section that will absorb the other.
+        secondary_text: The text of the section to be merged in.
+        merge_rationale: Brief explanation of why these sections are being merged.
+        model_name: The Gemini model to use for merging.
+        temperature: The sampling temperature for the LLM.
+
+    Returns:
+        The merged text string, or an error message if merging fails.
+    """
+    logger.info(f"Attempting to merge sections (lengths: {len(primary_text)}, {len(secondary_text)} chars) using {model_name}...")
+
+    # 1. Get LLM instance
+    llm = get_gemini_llm(model_name=model_name, temperature=temperature)
+    if not llm:
+        error_msg = "Failed to initialize LLM. Cannot merge texts."
+        logger.error(error_msg)
+        return f"[Error: {error_msg}]"
+
+    # 2. Define the merge prompt
+    prompt_string = f"""System: You are an AI expert in tax law and legal document consolidation. Your task is to merge two tax code sections into a single coherent section. The merge is happening because: {merge_rationale}
+
+Guidelines:
+- Preserve all essential legal requirements and financial implications from both sections
+- Eliminate redundancy and overlapping content
+- Ensure logical flow and clear organization
+- Use consistent terminology throughout
+- Maintain the formal style of the tax code
+- The primary section's core purpose should guide the structure
+
+Primary Section Text:
+{primary_text}
+
+Section to Merge In:
+{secondary_text}
+
+Output ONLY the merged text, maintaining proper tax code formatting and style.
+
+Merged Text:"""
+
+    # 3. Invoke the LLM
+    try:
+        logger.debug("Invoking LLM for section merging...")
+        response = llm.invoke(prompt_string)
+        merged_text = response.content
+        logger.info(f"Successfully merged texts. Output length: {len(merged_text)} chars.")
+        return merged_text.strip()
+    except Exception as e:
+        error_msg = f"Error during LLM invocation for merging: {e}"
+        logger.error(error_msg, exc_info=True)
+        return f"[Error: {error_msg}]"
+
+# Create the LangChain Tool
+merge_tool = Tool.from_function(
+    func=merge_sections_text,
+    name="Merge Sections Text",
+    description="Combines two tax code sections into a single coherent section, preserving essential content while eliminating redundancy. Use when sections have significant overlap or complementary content that should be combined. Input requires primary text, secondary text, and merge rationale.",
+    args_schema=MergeInput
+)
+
 # Example usage (for testing the tool function directly)
 # Note: Requires GEMINI_API_KEY to be set in the environment/.env file
 if __name__ == '__main__':
