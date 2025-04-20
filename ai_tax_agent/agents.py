@@ -10,6 +10,7 @@ from langchain.tools import Tool
 from langchain_community.utilities import SerpAPIWrapper
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain.prompts import PromptTemplate
+from typing import Literal, Optional
 
 from ai_tax_agent.settings import settings
 from ai_tax_agent.llm_utils import get_gemini_llm

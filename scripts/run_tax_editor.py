@@ -7,6 +7,7 @@ import sys
 from decimal import Decimal
 from typing import Optional
 import warnings
+import re # Add import for regex
 
 # Setup project path
 project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
@@ -33,8 +34,13 @@ from ai_tax_agent.database.models import UsCodeSection, UsCodeSectionRevised, Se
 from ai_tax_agent.database.versioning import determine_version_numbers
 
 # Agent imports
-from ai_tax_agent.agents import create_tax_editor_agent
+from ai_tax_agent.agents import create_tax_editor_agent # Keep agent import
+from ai_tax_agent.outputs import TaxEditorOutput # Import the output model from the new file
 from ai_tax_agent.settings import settings # May need settings for agent config
+
+# LangChain Parser import
+from langchain.output_parsers import PydanticOutputParser
+from langchain_core.exceptions import OutputParserException # Import for specific error handling
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -89,6 +95,9 @@ def process_sections(limit: int | None = None, clear: bool = False):
             logger.error("Failed to create Tax Editor Agent.")
             return
         logger.info("Tax Editor Agent created successfully.")
+
+        # +++ Create Output Parser +++
+        parser = PydanticOutputParser(pydantic_object=TaxEditorOutput)
 
         # --- Identify Sections to Process ---
         # Find sections that DO NOT have a SectionVersion for the working_version
@@ -160,7 +169,7 @@ def process_sections(limit: int | None = None, clear: bool = False):
                 """
 
                 # 4. Invoke Agent
-                logger.debug(f"Invoking agent with input:\n{relevant_text_input}")
+                logger.debug(f"Invoking agent with input:\\n{relevant_text_input}")
                 response = agent_executor.invoke({"relevant_text": relevant_text_input})
                 agent_output = response.get('output')
                 logger.debug(f"Agent raw output: {agent_output}")
@@ -169,51 +178,72 @@ def process_sections(limit: int | None = None, clear: bool = False):
                     logger.error(f"Agent did not return 'output' for section {section.id}. Skipping.")
                     continue
 
-                # 5. Parse Agent Output JSON
+                # 5. Parse Agent Output
+                parsed_output: Optional[TaxEditorOutput] = None
                 try:
-                    # The agent should output JUST the JSON string
-                    # Sometimes agents add backticks or "json" prefix
-                    if agent_output.strip().startswith("```json"):
-                         agent_output = agent_output.strip()[7:-3].strip()
-                    elif agent_output.strip().startswith("```"):
-                         agent_output = agent_output.strip()[3:-3].strip()
+                    # Use regex to find the first JSON object within the output string
+                    agent_output_str = str(agent_output).strip()
+                    # Use non-greedy matching (.*?) to find the *shortest* block
+                    match = re.search(r'\{.*?\}', agent_output_str, re.DOTALL)
 
-                    result_data = json.loads(agent_output)
-                    logger.info(f"Agent decision for section {section.id}: {result_data.get('action')}")
-                    logger.debug(f"Agent result data: {result_data}")
+                    if not match:
+                        raise ValueError("No valid JSON object found in agent output.")
 
-                except json.JSONDecodeError as json_e:
-                    logger.error(f"Failed to parse agent JSON output for section {section.id}: {json_e}")
-                    logger.error(f"Raw output was: {agent_output}")
-                    continue # Skip persisting if output is bad
+                    potential_json_str = match.group(0)
+
+                    # First, try parsing the string with standard json library
+                    try:
+                        data_dict = json.loads(potential_json_str)
+                    except json.JSONDecodeError as json_e:
+                        logger.error(f"Failed to decode extracted JSON string for section {section.id}: {json_e}")
+                        logger.error(f"Extracted string was: {potential_json_str}")
+                        logger.error(f"Original raw output was: {agent_output}")
+                        continue # Skip if basic JSON parsing fails
+
+                    # If JSON string is valid, validate with Pydantic model
+                    try:
+                        parsed_output = TaxEditorOutput.model_validate(data_dict)
+                        logger.info(f"Agent decision for section {section.id}: {parsed_output.action}")
+                        logger.debug(f"Agent parsed result data: {parsed_output.model_dump()}")
+                    except Exception as pydantic_e: # Catch Pydantic validation errors specifically
+                        logger.error(f"Pydantic validation failed for section {section.id}: {pydantic_e}")
+                        logger.error(f"Data dictionary passed to Pydantic was: {data_dict}")
+                        logger.error(f"Original raw output was: {agent_output}")
+                        continue # Skip if Pydantic validation fails
+
+                except ValueError as ve:
+                    logger.error(f"JSON extraction failed for section {section.id}: {ve}")
+                    logger.error(f"Original raw output was: {agent_output}")
+                    continue
+                except Exception as e: # Catch other unexpected errors during extraction/parsing
+                     logger.error(f"An unexpected error occurred during parsing/extraction for section {section.id}: {e}", exc_info=True)
+                     logger.error(f"Original raw output was: {agent_output}")
+                     continue
+
+                # Ensure parsed_output is not None before proceeding
+                if parsed_output is None:
+                    logger.error(f"Skipping section {section.id} due to parsing/validation failure.")
+                    continue
 
                 # 6. Persist Results to SectionVersion
-                # **UPDATED**: Use UsCodeSectionRevised and its fields
-                # Check UsCodeSectionRevised fields: orig_section_id, version, deleted, core_text,
-                # revised_complexity, revised_financial_impact
-                # We need to store action/rationale elsewhere (maybe SectionHistory or add fields?)
-                # For now, store what we can in UsCodeSectionRevised
-                action = result_data.get('action')
+                # Access data via Pydantic model attributes
+                action = parsed_output.action
                 is_deleted = (action == 'delete')
-                # Store the agent's generated text if simplified/redrafted, otherwise store None
-                revised_text = result_data.get('after_text') if action in ['simplify', 'redraft'] else None
+                revised_text = parsed_output.after_text # Already Optional[str]
 
                 new_version_record = UsCodeSectionRevised(
                     orig_section_id=section.id,
                     version=working_version,
                     deleted=is_deleted,
-                    core_text=revised_text, # Store the new text or None if deleted/kept
-                    revised_complexity = float(result_data.get('new_complexity_score')) if result_data.get('new_complexity_score') is not None else None,
-                    # Store estimated financial impact for this version.
-                    # Use kept_dollars if present and not deleted, else use deleted_dollars if present, else None.
+                    core_text=revised_text, # Use directly from parsed output
+                    # Use the parsed float value directly, None if not present
+                    revised_complexity = parsed_output.new_complexity_score, 
+                    # Use the parsed Decimal values directly, handle None
                     revised_financial_impact = (
-                        Decimal(str(result_data.get('estimated_kept_dollars'))) if result_data.get('estimated_kept_dollars') is not None and not is_deleted
-                        else Decimal(str(result_data.get('estimated_deleted_dollars'))) * -1 if result_data.get('estimated_deleted_dollars') is not None and is_deleted # Store deleted as negative impact
-                        else None
+                        parsed_output.estimated_kept_dollars if not is_deleted and parsed_output.estimated_kept_dollars is not None
+                        else parsed_output.estimated_deleted_dollars * -1 if is_deleted and parsed_output.estimated_deleted_dollars is not None
+                        else None # Explicitly handle case where neither is set or applicable
                     ),
-                    # --- TODO: Store action/rationale --- 
-                    # This might require adding fields to UsCodeSectionRevised or creating a SectionHistory entry
-
                     # Replicate other relevant fields from original UsCodeSection
                     subtitle=section.subtitle,
                     chapter=section.chapter,
@@ -224,12 +254,11 @@ def process_sections(limit: int | None = None, clear: bool = False):
                 )
 
                 # --- Optional: Create SectionHistory record ---
-                # Create SectionHistory record
                 history_record = SectionHistory(
                      orig_section_id=section.id,
-                     version_changed=working_version, # Record the version where the change happened
-                     action=action, # Use the 'action' variable derived from agent output
-                     rationale=result_data.get('rationale') # Get rationale from agent output
+                     version_changed=working_version,
+                     action=action, # Use action from parsed output
+                     rationale=parsed_output.rationale # Use rationale from parsed output
                 )
                 db.add(history_record) # Add history record to the session
                 # -------------------------------------------

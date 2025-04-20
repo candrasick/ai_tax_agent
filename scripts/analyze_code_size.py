@@ -10,6 +10,30 @@ from pypdf import PdfReader
 from pypdf.errors import PdfReadError
 from tqdm import tqdm
 
+# Add constants for 4K resolution output
+DPI = 300  # Standard high-quality DPI
+WIDTH_PIXELS = 3840
+HEIGHT_PIXELS = 2160
+WIDTH_INCHES = WIDTH_PIXELS / DPI
+HEIGHT_INCHES = HEIGHT_PIXELS / DPI
+
+def set_high_res_style():
+    """Configure plot style for 4K resolution."""
+    plt.style.use('seaborn-v0_8-darkgrid')  # Use a nice style with dark grid
+    plt.rcParams.update({
+        'font.size': 14,
+        'axes.labelsize': 16,
+        'axes.titlesize': 18,
+        'xtick.labelsize': 14,
+        'ytick.labelsize': 14,
+        'legend.fontsize': 14,
+        'figure.dpi': DPI,
+        'savefig.dpi': DPI,
+        'lines.linewidth': 2.5,  # Thicker lines for better visibility
+        'lines.markersize': 10,  # Larger markers
+        'grid.linewidth': 1.5    # Thicker grid lines
+    })
+
 def get_pdf_page_count(pdf_path):
     """Counts the number of pages in a PDF file."""
     try:
@@ -125,32 +149,63 @@ def analyze_code_size(tax_code_pdf, bulletins_dir, output_plot_file, projection_
     }).set_index('year')
 
     # 5. Plotting
-    print(f"Generating plot: {output_plot_file}")
-    plt.style.use('seaborn-v0_8-darkgrid') # Use a nice style
-    fig, ax = plt.subplots(figsize=(12, 7))
+    print(f"Generating 4K resolution plot ({WIDTH_PIXELS}x{HEIGHT_PIXELS}) at {output_plot_file}")
+    
+    # Set the high-resolution style
+    set_high_res_style()
+    
+    # Create figure with 4K dimensions
+    fig, ax = plt.subplots(figsize=(WIDTH_INCHES, HEIGHT_INCHES))
 
-    # Plot historical data
-    ax.plot(df.index, df['total_pages'], label='Historical Total Pages (Code + Bulletins)', marker='.', linestyle='-')
+    # Plot historical data with enhanced styling
+    historical_line = ax.plot(df.index, df['total_pages'], 
+                            label='Historical Total Pages (Code + Bulletins)', 
+                            marker='.', 
+                            linestyle='-',
+                            color='#2077B4')  # Rich blue color
 
-    # Plot projected data
-    ax.plot(projection_df.index, projection_df['projected_total_pages'], label=f'Projected Growth ({annual_page_growth_avg:.0f} pages/year avg)', linestyle='--')
+    # Plot projected data with enhanced styling
+    projection_line = ax.plot(projection_df.index, 
+                            projection_df['projected_total_pages'], 
+                            label=f'Projected Growth ({annual_page_growth_avg:.0f} pages/year avg)', 
+                            linestyle='--',
+                            color='#FF7F0E')  # Contrasting orange color
 
-    # Formatting
-    ax.set_xlabel("Year")
-    ax.set_ylabel("Total Pages")
-    ax.set_title("Estimated Growth of U.S. Tax Code + IRS Bulletins (Pages)")
-    ax.legend()
-    ax.grid(True)
-    ax.ticklabel_format(style='plain', axis='y') # Avoid scientific notation on y-axis
+    # Enhanced Formatting
+    ax.set_xlabel("Year", fontsize=16, labelpad=10)
+    ax.set_ylabel("Total Pages", fontsize=16, labelpad=10)
+    ax.set_title("Estimated Growth of U.S. Tax Code + IRS Bulletins (Pages)", 
+                fontsize=18, pad=20)
+    
+    # Enhanced legend
+    ax.legend(loc='upper left', frameon=True, fancybox=True, shadow=True)
+    
+    # Ensure grid is visible but not overwhelming
+    ax.grid(True, linestyle='--', alpha=0.7)
+    
+    # Avoid scientific notation on y-axis and format with commas
+    ax.ticklabel_format(style='plain', axis='y')
+    ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, p: format(int(x), ',')))
+
+    # Add some padding to the y-axis limits for better visibility
+    ymin, ymax = ax.get_ylim()
+    ax.set_ylim(ymin, ymax * 1.1)  # Add 10% padding at the top
+
+    # Rotate x-axis labels slightly for better readability
+    plt.xticks(rotation=15)
+
+    # Adjust layout to prevent label clipping
+    plt.tight_layout()
 
     # Ensure plot directory exists
     os.makedirs(os.path.dirname(output_plot_file) or '.', exist_ok=True)
     try:
-        plt.savefig(output_plot_file, dpi=300)
-        print(f"Plot saved successfully to {output_plot_file}")
+        plt.savefig(output_plot_file, dpi=DPI, bbox_inches='tight')
+        print(f"4K plot saved successfully to {output_plot_file}")
     except Exception as e:
         print(f"Error saving plot: {e}")
-    # plt.show() # Uncomment to display plot interactively if needed
+    finally:
+        plt.close(fig)  # Clean up
 
 # --- Main Execution ---
 if __name__ == "__main__":

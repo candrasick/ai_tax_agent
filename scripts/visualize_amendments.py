@@ -24,6 +24,13 @@ DB_URL = settings.database_url
 
 def create_visualizations(output_dir: str = PLOTS_DIR):
     """Fetches data and creates amendment count visualizations."""
+    # Set up high resolution output parameters
+    DPI = 300  # Standard high-quality DPI
+    WIDTH_PIXELS = 3840
+    HEIGHT_PIXELS = 2160
+    WIDTH_INCHES = WIDTH_PIXELS / DPI
+    HEIGHT_INCHES = HEIGHT_PIXELS / DPI
+
     print(f"Connecting to database: {DB_URL}")
     try:
         engine = create_engine(DB_URL)
@@ -54,10 +61,10 @@ def create_visualizations(output_dir: str = PLOTS_DIR):
 
     # --- Plot 1: Top N Most Amended Sections --- 
     try:
-        print(f"Generating Top {TOP_N} Amended Sections plot...")
+        print(f"Generating Top {TOP_N} Amended Sections plot at {WIDTH_PIXELS}x{HEIGHT_PIXELS} resolution...")
         top_n_df = df.nlargest(TOP_N, 'amendment_count')
 
-        plt.figure(figsize=(12, 8))
+        plt.figure(figsize=(WIDTH_INCHES, HEIGHT_INCHES), dpi=DPI)
         # Create labels like "§Number: Title"
         # Shorten long titles for better display
         max_title_len = 40
@@ -65,6 +72,15 @@ def create_visualizations(output_dir: str = PLOTS_DIR):
             lambda row: f"§{row['section_number']}: {row['section_title'][:max_title_len] + '...' if row['section_title'] and len(row['section_title']) > max_title_len else row['section_title'] or '[No Title]'}", 
             axis=1
         )
+        
+        # Increase font sizes for 4K resolution
+        plt.rcParams.update({
+            'font.size': 14,
+            'axes.labelsize': 16,
+            'axes.titlesize': 18,
+            'xtick.labelsize': 14,
+            'ytick.labelsize': 14
+        })
         
         # Use seaborn for potentially nicer aesthetics
         barplot = sns.barplot(x='amendment_count', y='label', data=top_n_df, palette="viridis", hue='label', dodge=False, legend=False)
@@ -74,12 +90,12 @@ def create_visualizations(output_dir: str = PLOTS_DIR):
         plt.ylabel('Section')
         plt.tight_layout()
         
-        # Add counts at the end of the bars
+        # Add counts at the end of the bars with larger font
         for container in barplot.containers:
-            barplot.bar_label(container, fmt='%d', padding=3)
+            barplot.bar_label(container, fmt='%d', padding=3, size=14)
 
         plot1_filename = os.path.join(output_dir, "top_amended_sections.png")
-        plt.savefig(plot1_filename)
+        plt.savefig(plot1_filename, dpi=DPI, bbox_inches='tight')
         plt.close()
         print(f"Saved plot to {plot1_filename}")
     except Exception as e:
@@ -87,8 +103,8 @@ def create_visualizations(output_dir: str = PLOTS_DIR):
 
     # --- Plot 2: Distribution of Amendment Counts (Histogram) ---
     try:
-        print("Generating Amendment Count Distribution plot...")
-        plt.figure(figsize=(12, 6))
+        print(f"Generating Amendment Count Distribution plot at {WIDTH_PIXELS}x{HEIGHT_PIXELS} resolution...")
+        plt.figure(figsize=(WIDTH_INCHES, HEIGHT_INCHES), dpi=DPI)
 
         # Use seaborn's histplot for flexibility
         # Filter out sections with 0 amendments for potentially better visualization of amended sections
@@ -106,7 +122,7 @@ def create_visualizations(output_dir: str = PLOTS_DIR):
             plt.tight_layout()
             
             plot2_filename = os.path.join(output_dir, "amendment_distribution.png")
-            plt.savefig(plot2_filename)
+            plt.savefig(plot2_filename, dpi=DPI, bbox_inches='tight')
             plt.close()
             print(f"Saved plot to {plot2_filename}")
         else:

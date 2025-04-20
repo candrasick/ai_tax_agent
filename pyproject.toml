@@ -32,7 +32,8 @@ dependencies = [
     "google-search-results>=2.4.2,<3.0.0",
     "numexpr (>=2.10.2,<3.0.0)",
     "numpy (>=2.2.4,<3.0.0)",
-    "textstat (>=0.7.5,<0.8.0)"
+    "textstat (>=0.7.5,<0.8.0)",
+    "scipy (>=1.15.2,<2.0.0)"
 ]
 
 

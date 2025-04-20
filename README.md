@@ -11,6 +11,112 @@ The agent will:
 3.  Iteratively simplify the code by removing/combining sections and rewriting them clearly.
 4.  Track each simplification step, aiming for a final target of ~10 pages each for personal and business taxation.
 
+## System Architecture
+
+```mermaid
+flowchart TB
+    subgraph DataSources["Data Sources"]
+        IRC["Internal Revenue Code<br/>XML/Text"]
+        IRB["IRS Bulletins<br/>PDFs"]
+        SOI["Statistics of Income<br/>PDFs"]
+    end
+
+    subgraph Storage["Storage Layer"]
+        CHROMA["ChromaDB<br/>Vector Store<br/>(Semantic Search)"]
+        SQL["SQLite Database<br/>(Structured Data)"]
+    end
+
+    subgraph Agent["AI Tax Editor Agent"]
+        direction TB
+        LANG["LangChain<br/>Orchestration"]
+        TOOLS["Analysis Tools"]
+        EDITOR["Tax Code Editor"]
+        VIZ["Visualization Tools"]
+        
+        subgraph Tools["Analysis Capabilities"]
+            direction LR
+            T1["Complexity<br/>Scoring"]
+            T2["Impact<br/>Assessment"]
+            T3["Exemption<br/>Detection"]
+            T4["Version<br/>Management"]
+        end
+    end
+
+    DataSources --> Storage
+    IRC --> |"Parse & Index"| CHROMA
+    IRC --> |"Structure"| SQL
+    IRB --> |"Extract"| CHROMA
+    IRB --> |"Link"| SQL
+    SOI --> |"Statistics"| SQL
+
+    CHROMA --> |"Search"| LANG
+    SQL --> |"Query"| LANG
+    LANG --> TOOLS
+    LANG --> EDITOR
+    TOOLS --> SQL
+    EDITOR --> SQL
+    SQL --> VIZ
+
+    TOOLS --> Tools
+    
+    style CHROMA fill:#f9f,stroke:#333,stroke-width:2px
+    style SQL fill:#bbf,stroke:#333,stroke-width:2px
+    style Agent fill:#f6f6f6,stroke:#333,stroke-width:2px
+    style Tools fill:#e6ffe6,stroke:#333,stroke-width:1px
+    style Storage fill:#f6f6f6,stroke:#333,stroke-width:2px
+    style DataSources fill:#f6f6f6,stroke:#333,stroke-width:2px
+```
+
+The system architecture consists of three main layers:
+
+1. **Data Sources**
+   - Internal Revenue Code (IRC) in XML/text format
+   - IRS Bulletins (IRBs) in PDF format
+   - Statistics of Income (SOI) data in PDF format
+
+2. **Storage Layer**
+   - ChromaDB: Vector store for semantic search and retrieval
+   - SQLite: Relational database for structured data and relationships
+
+3. **AI Tax Editor Agent**
+   - LangChain: Orchestrates the overall workflow and agent behavior
+   - Analysis Tools: 
+     * Complexity scoring of tax code sections
+     * Impact assessment using SOI data
+     * Exemption detection and analysis
+     * Version management of simplified sections
+   - Tax Code Editor: Handles the iterative simplification process
+   - Visualization Tools: Generate 4K resolution analysis plots
+
+## Analysis & Visualization Tools
+
+The project includes several sophisticated analysis and visualization tools:
+
+### Complexity Analysis
+* `scripts/analyze_complexity_distribution.py`: Generates a 4K resolution plot showing the distribution of complexity scores across all tax code sections. Includes histogram, kernel density estimation, and key statistics (mean, median, range).
+* `scripts/plot_complexity_distribution.py`: Creates a 3D scatter plot visualizing the relationship between section complexity, financial impact, and entity impact. Highlights three key regions:
+  - High Impact/High Complexity
+  - Low Impact/Low Complexity
+  - Low to Moderate Impact/High Complexity
+
+### Impact Analysis
+* `scripts/analyze_section_mentions.py`: Analyzes the frequency of section mentions in IRS bulletins and their correlation with amendment counts. Generates two plots:
+  - Top sections by bulletin mentions
+  - Correlation between mentions and amendments
+
+### Code Growth Analysis
+* `scripts/analyze_code_size.py`: Tracks the growth of the tax code over time by analyzing:
+  - Base tax code page count
+  - Cumulative bulletin pages
+  - Projects future growth based on historical trends
+
+### Version Analysis
+* `scripts/run_tax_editor_v2.py`: Manages the iterative simplification process:
+  - Tracks versions of simplified sections
+  - Handles deleted sections
+  - Processes exemptions and their impact
+  - Updates complexity scores and status
+
 ## Setup
 
 This project uses [Poetry](https://python-poetry.org/) for dependency management and packaging.
@@ -108,22 +214,223 @@ This project uses a `Makefile` to streamline common tasks. Here's a breakdown of
 
 *(Note: Other targets like `parse-tax-code-custom`, `analyze-amendments`, `index-*` etc., exist for specific data processing or indexing tasks. Refer to the `Makefile` for details.)*
 
+**Additional Analysis Targets:**
+
+* `make plot-complexity`
+  - Generates high-resolution (4K) visualizations of tax code complexity distribution
+  - Output: `plots/section_complexity_distribution.png`
+
+* `make plot-impact`
+  - Creates 3D scatter plots of section impact vs. complexity
+  - Output: `plots/section_impact_complexity_3d.png`
+
+### Key Metrics
+
+The project tracks several key metrics for each tax code section:
+
+1. **Complexity Score** (0-10 scale):
+   - Current distribution: Mean=5.30, Median=4.50
+   - Range: 0.20 (simplest) to 9.80 (most complex)
+
+2. **Impact Metrics**:
+   - Financial Impact: Revenue generated/lost (in USD)
+   - Entity Impact: Number of taxpayers/forms affected
+   - Exemption Impact: Revenue and entities affected by specific exemptions
+
+3. **Amendment Tracking**:
+   - Historical amendment count
+   - Bulletin references
+   - Version history of simplification attempts
+
 ### Database Schema (`data/tax_data.db`)
 
-The project uses an SQLite database managed by SQLAlchemy and Alembic. The core tables are:
+The project uses an SQLite database managed by SQLAlchemy and Alembic. Below is the complete entity-relationship diagram:
 
-*   `alembic_version`:
-    *   Tracks the current database migration version (used by Alembic).
-*   `us_code_section`:
-    *   Stores parsed sections of the U.S. Internal Revenue Code (Title 26).
-    *   Key columns: `id`, `section_number`, `section_title`, `full_text`, `amendment_count`, `amendments_text`, `core_text`.
-*   `irs_bulletin`:
-    *   Stores metadata about each downloaded Internal Revenue Bulletin.
-    *   Key columns: `id`, `bulletin_number`, `bulletin_date`, `source_url`.
-*   `irs_bulletin_item`:
-    *   Stores individual items (like Revenue Rulings, Notices, etc.) extracted from within each bulletin.
-    *   Key columns: `id`, `bulletin_id` (FK to `irs_bulletin`), `item_type`, `item_number`, `title`, `full_text`, `referenced_sections`.
-*   `irs_bulletin_item_to_code_section`:
-    *   A many-to-many link table connecting bulletin items (`bulletin_item_id`) to the specific code sections (`section_id` -> `us_code_section.id`) they reference.
+```mermaid
+erDiagram
+    UsCodeSection ||--o{ UsCodeSectionRevised : "has revisions"
+    UsCodeSection ||--o{ SectionHistory : "has history"
+    UsCodeSection ||--o| SectionComplexity : "has complexity"
+    UsCodeSection ||--o| SectionImpact : "has impact"
+    UsCodeSection ||--o{ Exemption : "has exemptions"
+    UsCodeSection ||--o{ IrsBulletinItemToCodeSection : "referenced in"
+    IrsBulletin ||--o{ IrsBulletinItem : "contains"
+    IrsBulletinItem ||--o{ IrsBulletinItemToCodeSection : "references"
+    FormInstruction ||--o{ FormField : "has fields"
+    FormField ||--o| FormFieldStatistics : "has stats"
+    FormField ||--o{ FormFieldUsCodeSectionLink : "links to"
+    UsCodeSection ||--o{ FormFieldUsCodeSectionLink : "linked from"
 
-(Further details on agent usage will be added as components are developed.)
+    UsCodeSection {
+        int id PK
+        int parent_id FK
+        text section_number
+        text section_title
+        text full_text
+        text core_text
+        text amendments_text
+        int amendment_count
+        float amendment_count_z
+        float bulletins_count_z
+        float section_count_z
+    }
+
+    SectionComplexity {
+        int id PK
+        int section_id FK
+        float complexity_score
+        text rationale
+    }
+
+    SectionImpact {
+        int id PK
+        int section_id FK
+        numeric revenue_impact
+        numeric entity_impact
+        text rationale
+    }
+
+    Exemption {
+        int id PK
+        int section_id FK
+        numeric revenue_impact_estimate
+        numeric entity_impact
+        text rationale
+        text relevant_text
+    }
+
+    UsCodeSectionRevised {
+        int id PK
+        int orig_section_id FK
+        int version
+        bool deleted
+        text core_text
+        float revised_complexity
+        numeric revised_financial_impact
+    }
+
+    SectionHistory {
+        int id PK
+        int orig_section_id FK
+        int version_changed
+        text action
+        text rationale
+    }
+
+    IrsBulletin {
+        int id PK
+        text bulletin_number
+        date bulletin_date
+        text title
+        text source_url
+    }
+
+    IrsBulletinItem {
+        int id PK
+        int bulletin_id FK
+        text item_type
+        text item_number
+        text title
+        text full_text
+    }
+
+    IrsBulletinItemToCodeSection {
+        int id PK
+        int bulletin_item_id FK
+        int section_id FK
+    }
+
+    FormInstruction {
+        int id PK
+        string form_number
+        string title
+        string html_url
+    }
+
+    FormField {
+        int id PK
+        int instruction_id FK
+        string field_label
+        text full_text
+    }
+
+    FormFieldStatistics {
+        int form_field_id PK, FK
+        numeric dollars
+        numeric forms
+        numeric people
+    }
+
+    FormFieldUsCodeSectionLink {
+        int id PK
+        int form_field_id FK
+        int us_code_section_id FK
+        text rationale
+    }
+```
+
+The schema consists of several key components:
+
+1. **Core Tax Code Management**
+   - `UsCodeSection`: Base table storing tax code sections
+   - `UsCodeSectionRevised`: Tracks versions of simplified sections
+   - `SectionHistory`: Records changes and actions taken on sections
+
+2. **Analysis Components**
+   - `SectionComplexity`: Complexity scores and rationale
+   - `SectionImpact`: Revenue and entity impact assessments
+   - `Exemption`: Specific exemptions within sections
+
+3. **IRS Bulletin Integration**
+   - `IrsBulletin`: Bulletin metadata
+   - `IrsBulletinItem`: Individual items within bulletins
+   - `IrsBulletinItemToCodeSection`: Links bulletins to relevant sections
+
+4. **Form Analysis**
+   - `FormInstruction`: IRS form metadata
+   - `FormField`: Individual fields within forms
+   - `FormFieldStatistics`: Impact statistics for form fields
+   - `FormFieldUsCodeSectionLink`: Links forms to relevant code sections
+
+## Visualization Outputs
+
+All visualization scripts output high-resolution (3840x2160) plots for detailed analysis:
+
+1. `plots/section_complexity_distribution.png`
+   - Distribution of complexity scores
+   - Includes mean/median indicators and density estimation
+
+2. `plots/section_impact_complexity_3d.png`
+   - 3D visualization of impact vs. complexity
+   - Color-coded regions for different impact/complexity combinations
+
+3. `plots/tax_code_growth.png`
+   - Historical and projected growth of tax code size
+   - Includes both base code and cumulative bulletin pages
+
+4. `plots/top_bulletin_mentions_from_db.png`
+   - Most frequently referenced sections in IRS bulletins
+
+5. `plots/mentions_amendments_correlation_from_db.png`
+   - Correlation between bulletin mentions and amendment frequency
+
+## Future Development
+
+Planned enhancements include:
+
+1. Integration of machine learning models for:
+   - Automated complexity scoring
+   - Impact prediction
+   - Optimization of simplification strategies
+
+2. Enhanced visualization features:
+   - Interactive dashboards
+   - Real-time tracking of simplification progress
+   - Network analysis of section relationships
+
+3. Automated testing and validation:
+   - Consistency checks for simplified sections
+   - Impact assessment validation
+   - Revenue neutral verification
+
+*(Note: Other targets like `parse-tax-code-custom`, `analyze-amendments`, `index-*` etc., exist for specific data processing or indexing tasks. Refer to the `Makefile` for details.)*

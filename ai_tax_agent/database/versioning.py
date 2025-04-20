@@ -35,7 +35,7 @@ def determine_version_numbers() -> Tuple[int, int]:
 
     Looks at the `us_code_section_revised` table to find the highest version
     number and compares the count of rows for that version against the count
-    in the `us_code_section` table.
+    in the `us_code_section` table, accounting for sections deleted in prior versions.
 
     Returns:
         A tuple containing (prior_version, working_version).
@@ -70,22 +70,33 @@ def determine_version_numbers() -> Tuple[int, int]:
             orig_section_count = db.query(UsCodeSection.id).count()
             logger.debug(f"Total original sections count: {orig_section_count}")
 
+            # Get count of sections deleted in prior versions
+            deleted_sections_count = db.query(UsCodeSectionRevised.orig_section_id)\
+                .filter(UsCodeSectionRevised.deleted == True)\
+                .filter(UsCodeSectionRevised.version < max_version)\
+                .distinct()\
+                .count()
+            logger.debug(f"Sections deleted in prior versions: {deleted_sections_count}")
+
             # Count sections in the highest existing revision
             revised_count_for_max = db.query(UsCodeSectionRevised.id)\
                 .filter(UsCodeSectionRevised.version == max_version)\
                 .count()
             logger.debug(f"Sections found in revision version {max_version}: {revised_count_for_max}")
 
-            if revised_count_for_max >= orig_section_count:
-                # The latest version is complete (or has at least as many rows).
-                # Start a new version for the next run.
-                logger.info(f"Version {max_version} appears complete ({revised_count_for_max} >= {orig_section_count}). Starting new version.")
+            # Total expected sections is original count minus previously deleted sections
+            expected_section_count = orig_section_count - deleted_sections_count
+            logger.debug(f"Expected sections to process: {expected_section_count}")
+
+            if revised_count_for_max >= expected_section_count:
+                # The latest version is complete (accounting for previously deleted sections)
+                logger.info(f"Version {max_version} appears complete ({revised_count_for_max} >= {expected_section_count}). Starting new version.")
                 prior_version = max_version
                 working_version = max_version + 1
             else:
                 # The latest version is incomplete. Continue working on it.
                 # The 'prior' version is the one before this incomplete one.
-                logger.info(f"Version {max_version} is incomplete ({revised_count_for_max} < {orig_section_count}). Continuing work on version {max_version}.")
+                logger.info(f"Version {max_version} is incomplete ({revised_count_for_max} < {expected_section_count}). Continuing work on version {max_version}.")
                 prior_version = max(0, max_version - 1) # Ensure prior_version doesn't go below 0
                 working_version = max_version
 

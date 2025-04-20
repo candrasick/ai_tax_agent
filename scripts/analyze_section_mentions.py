@@ -24,6 +24,27 @@ if not DATABASE_URL:
 # Constants - Remove bulletin/XML paths, keep plots dir
 PLOTS_DIR_DEFAULT = Path("plots/")
 
+# Add constants for 4K resolution output
+DPI = 300  # Standard high-quality DPI
+WIDTH_PIXELS = 3840
+HEIGHT_PIXELS = 2160
+WIDTH_INCHES = WIDTH_PIXELS / DPI
+HEIGHT_INCHES = HEIGHT_PIXELS / DPI
+
+def set_high_res_style():
+    """Configure plot style for 4K resolution."""
+    plt.style.use('default')  # Reset to default style
+    plt.rcParams.update({
+        'font.size': 14,
+        'axes.labelsize': 16,
+        'axes.titlesize': 18,
+        'xtick.labelsize': 14,
+        'ytick.labelsize': 14,
+        'legend.fontsize': 14,
+        'figure.dpi': DPI,
+        'savefig.dpi': DPI
+    })
+
 def get_bulletin_mention_counts_from_db(engine) -> pd.DataFrame:
     """Queries the database to count bulletin links per section, including titles."""
     logging.info("Querying database for bulletin mention counts and titles...")
@@ -95,7 +116,7 @@ def plot_top_mentions(df: pd.DataFrame, output_file: Path):
          logging.warning("No sections with bulletin mentions found. Skipping top mentions plot.")
          return
 
-    logging.info("Generating Top 10 Bulletin Mentions plot with Titles...")
+    logging.info(f"Generating Top 10 Bulletin Mentions plot with Titles at {WIDTH_PIXELS}x{HEIGHT_PIXELS} resolution...")
     # Sort by mentions, keep title associated with the index (section number)
     top_10 = df_mentions.nlargest(10, 'bulletin_mentions')
 
@@ -103,7 +124,9 @@ def plot_top_mentions(df: pd.DataFrame, output_file: Path):
         logging.warning("No data available for top mentions plot.")
         return
 
-    plt.figure(figsize=(12, 8)) # Increased height for potentially longer labels
+    set_high_res_style()
+    plt.figure(figsize=(WIDTH_INCHES, HEIGHT_INCHES))
+    
     # Plot using index for positioning, but we'll set labels from 'section_title'
     ax = sns.barplot(x=top_10.index, y=top_10['bulletin_mentions'], palette="viridis")
     
@@ -117,11 +140,16 @@ def plot_top_mentions(df: pd.DataFrame, output_file: Path):
     plt.xlabel('IRC Section (Number: Title)') # Updated axis label
     plt.ylabel('Number of Bulletin Links')
     plt.xticks(rotation=45, ha='right')
+    
+    # Add value labels on top of bars
+    for i, v in enumerate(top_10['bulletin_mentions']):
+        ax.text(i, v, str(v), ha='center', va='bottom', fontsize=14)
+    
     plt.tight_layout()
     
     try:
         output_file.parent.mkdir(parents=True, exist_ok=True)
-        plt.savefig(output_file)
+        plt.savefig(output_file, bbox_inches='tight')
         logging.info(f"Top mentions plot saved to {output_file}")
         plt.close()
     except Exception as e:
@@ -141,17 +169,26 @@ def plot_correlation_heatmap(df: pd.DataFrame, output_file: Path):
          logging.warning("Not enough data with non-zero counts for correlation calculation. Skipping heatmap.")
          return
 
-    logging.info("Generating Correlation Heatmap...")
+    logging.info(f"Generating Correlation Heatmap at {WIDTH_PIXELS}x{HEIGHT_PIXELS} resolution...")
     correlation_matrix = df_numeric.corr()
 
-    plt.figure(figsize=(8, 6))
-    sns.heatmap(correlation_matrix, annot=True, cmap='coolwarm', fmt=".2f", linewidths=.5)
+    set_high_res_style()
+    plt.figure(figsize=(WIDTH_INCHES, HEIGHT_INCHES))
+    
+    # Increase annotation size for 4K
+    sns.heatmap(correlation_matrix, 
+                annot=True, 
+                cmap='coolwarm', 
+                fmt=".2f", 
+                linewidths=.5,
+                annot_kws={'size': 16})
+                
     plt.title('Correlation between Bulletin Links and Amendment Counts (from DB)')
     plt.tight_layout()
 
     try:
         output_file.parent.mkdir(parents=True, exist_ok=True)
-        plt.savefig(output_file)
+        plt.savefig(output_file, bbox_inches='tight')
         logging.info(f"Correlation heatmap saved to {output_file}")
         plt.close()
     except Exception as e:
